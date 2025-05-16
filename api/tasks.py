@@ -247,4 +247,260 @@ def process_scheduled_notifications():
             logger.exception(f"Erro ao processar notificações agendadas para {org.name}: {str(e)}")
     
     logger.info(f"Processamento de notificações agendadas concluído. {notification_count} notificações enviadas.")
-    return {'notifications_sent': notification_count} 
+    return {'notifications_sent': notification_count}
+
+# Tarefas para integração MISP
+
+@shared_task
+def auto_import_from_misp():
+    """
+    Tarefa para importar automaticamente eventos do MISP
+    """
+    from .models import MISPInstance, Organization
+    from .services.misp_service import MISPService
+    
+    logger.info("Iniciando importação automática do MISP")
+    
+    # Obter todas as instâncias MISP ativas
+    misp_instances = MISPInstance.objects.filter(is_active=True)
+    
+    if not misp_instances.exists():
+        logger.info("Nenhuma instância MISP ativa encontrada")
+        return
+    
+    results = {
+        'total_instances': misp_instances.count(),
+        'successful_imports': 0,
+        'failed_imports': 0,
+        'total_events_imported': 0,
+        'total_attributes_imported': 0,
+        'total_alerts_created': 0
+    }
+    
+    for instance in misp_instances:
+        try:
+            # Determinar a organização para importação
+            organization = instance.organization
+            
+            # Se a instância não está associada a uma organização específica,
+            # importar para todas as organizações
+            if not organization:
+                organizations = Organization.objects.all()
+                for org in organizations:
+                    try:
+                        misp_import = MISPService.import_from_misp(
+                            misp_instance=instance,
+                            organization=org,
+                            create_alerts=True
+                        )
+                        
+                        if misp_import.status == 'COMPLETED':
+                            results['successful_imports'] += 1
+                            results['total_events_imported'] += misp_import.imported_events_count
+                            results['total_attributes_imported'] += misp_import.imported_attributes_count
+                            results['total_alerts_created'] += misp_import.created_alerts_count
+                        else:
+                            results['failed_imports'] += 1
+                    except Exception as e:
+                        logger.error(f"Erro ao importar do MISP para organização {org.name}: {str(e)}")
+                        results['failed_imports'] += 1
+            else:
+                # Importar apenas para a organização associada
+                misp_import = MISPService.import_from_misp(
+                    misp_instance=instance,
+                    organization=organization,
+                    create_alerts=True
+                )
+                
+                if misp_import.status == 'COMPLETED':
+                    results['successful_imports'] += 1
+                    results['total_events_imported'] += misp_import.imported_events_count
+                    results['total_attributes_imported'] += misp_import.imported_attributes_count
+                    results['total_alerts_created'] += misp_import.created_alerts_count
+                else:
+                    results['failed_imports'] += 1
+        
+        except Exception as e:
+            logger.error(f"Erro ao importar do MISP {instance.name}: {str(e)}")
+            results['failed_imports'] += 1
+    
+    # Registrar resultados
+    logger.info(f"Importação automática do MISP concluída: {results}")
+    
+    # Atualizar métricas
+    update_misp_metrics()
+    
+    return results
+
+
+@shared_task
+def update_misp_metrics():
+    """
+    Atualiza as métricas relacionadas ao MISP
+    """
+    from .models import Metric, MetricSnapshot, MISPImport, MISPExport
+    from django.utils import timezone
+    from django.db.models import Count, Sum, Avg
+    from datetime import timedelta
+    
+    try:
+        # Definir período para métricas (últimos 30 dias)
+        end_date = timezone.now()
+        start_date = end_date - timedelta(days=30)
+        
+        # Obter ou criar métrica para importações MISP
+        misp_import_metric, _ = Metric.objects.get_or_create(
+            name='misp_import_stats',
+            defaults={
+                'display_name': 'Estatísticas de Importação MISP',
+                'description': 'Estatísticas de importações do MISP',
+                'metric_type': 'COUNT',
+                'entity_type': 'MISP_IMPORT'
+            }
+        )
+        
+        # Calcular estatísticas de importação
+        import_stats = MISPImport.objects.filter(
+            import_timestamp__gte=start_date,
+            import_timestamp__lte=end_date
+        ).aggregate(
+            total_imports=Count('import_id'),
+            total_events=Sum('imported_events_count'),
+            total_attributes=Sum('imported_attributes_count'),
+            total_alerts=Sum('created_alerts_count'),
+            avg_events_per_import=Avg('imported_events_count'),
+            avg_attributes_per_import=Avg('imported_attributes_count')
+        )
+        
+        # Criar snapshot para importações
+        MetricSnapshot.objects.create(
+            metric=misp_import_metric,
+            timestamp=end_date,
+            value_json={
+                'total_imports': import_stats['total_imports'] or 0,
+                'total_events': import_stats['total_events'] or 0,
+                'total_attributes': import_stats['total_attributes'] or 0,
+                'total_alerts': import_stats['total_alerts'] or 0,
+                'avg_events_per_import': float(import_stats['avg_events_per_import'] or 0),
+                'avg_attributes_per_import': float(import_stats['avg_attributes_per_import'] or 0),
+                'period_start': start_date.isoformat(),
+                'period_end': end_date.isoformat()
+            }
+        )
+        
+        # Obter ou criar métrica para exportações MISP
+        misp_export_metric, _ = Metric.objects.get_or_create(
+            name='misp_export_stats',
+            defaults={
+                'display_name': 'Estatísticas de Exportação MISP',
+                'description': 'Estatísticas de exportações para MISP',
+                'metric_type': 'COUNT',
+                'entity_type': 'MISP_EXPORT'
+            }
+        )
+        
+        # Calcular estatísticas de exportação
+        export_stats = MISPExport.objects.filter(
+            export_timestamp__gte=start_date,
+            export_timestamp__lte=end_date
+        ).aggregate(
+            total_exports=Count('export_id'),
+            total_observables=Sum('exported_observables_count'),
+            avg_observables_per_export=Avg('exported_observables_count')
+        )
+        
+        # Criar snapshot para exportações
+        MetricSnapshot.objects.create(
+            metric=misp_export_metric,
+            timestamp=end_date,
+            value_json={
+                'total_exports': export_stats['total_exports'] or 0,
+                'total_observables': export_stats['total_observables'] or 0,
+                'avg_observables_per_export': float(export_stats['avg_observables_per_export'] or 0),
+                'period_start': start_date.isoformat(),
+                'period_end': end_date.isoformat()
+            }
+        )
+        
+        logger.info("Métricas do MISP atualizadas com sucesso")
+        
+    except Exception as e:
+        logger.error(f"Erro ao atualizar métricas do MISP: {str(e)}")
+
+
+@shared_task
+def generate_report_for_case(case_id, template_id=None, output_format=None, sections=None):
+    """
+    Gera um relatório para um caso específico de forma assíncrona
+    
+    Args:
+        case_id: ID do caso
+        template_id: ID do template a ser usado (opcional)
+        output_format: Formato de saída (MARKDOWN, DOCX, PDF)
+        sections: Lista de seções a incluir no relatório
+    """
+    from .models import Case, ReportTemplate
+    from .services.report_service import ReportService
+    from django.contrib.auth.models import User
+    
+    try:
+        # Obter o caso
+        case = Case.objects.get(case_id=case_id)
+        
+        # Obter o template se especificado
+        template = None
+        if template_id:
+            try:
+                template = ReportTemplate.objects.get(template_id=template_id)
+            except ReportTemplate.DoesNotExist:
+                logger.error(f"Template {template_id} não encontrado")
+                return {"error": f"Template {template_id} não encontrado"}
+        
+        # Gerar o relatório
+        report = ReportService.generate_report(
+            case=case,
+            template=template,
+            output_format=output_format,
+            sections=sections
+        )
+        
+        if report.status == 'COMPLETED':
+            logger.info(f"Relatório {report.report_id} gerado com sucesso para o caso {case_id}")
+            
+            # Criar notificação sobre o relatório gerado
+            from .services import NotificationService
+            
+            try:
+                NotificationService.create_notification(
+                    event_name='REPORT_GENERATED',
+                    entity_id=str(report.report_id),
+                    entity_type='REPORT',
+                    title=f"Relatório gerado para o caso: {case.title}",
+                    message=f"Um relatório foi gerado no formato {report.output_format}.",
+                    organization=case.organization,
+                    related_object_id=str(case.case_id),
+                    related_object_type='CASE'
+                )
+            except Exception as e:
+                logger.error(f"Erro ao criar notificação para relatório gerado: {str(e)}")
+            
+            return {
+                "report_id": str(report.report_id),
+                "status": report.status,
+                "file_path": report.file_path
+            }
+        else:
+            logger.error(f"Erro ao gerar relatório para caso {case_id}: {report.error_message}")
+            return {
+                "report_id": str(report.report_id),
+                "status": report.status,
+                "error": report.error_message
+            }
+    
+    except Case.DoesNotExist:
+        logger.error(f"Caso {case_id} não encontrado")
+        return {"error": f"Caso {case_id} não encontrado"}
+    
+    except Exception as e:
+        logger.error(f"Erro ao gerar relatório para caso {case_id}: {str(e)}")
+        return {"error": str(e)} 

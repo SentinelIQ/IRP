@@ -1,25 +1,41 @@
 [project]
-name = "django-api"
+name = "django_api"
 version = "0.1.0"
-description = "Django API project"
+description = "Multi-tenant API platform"
 readme = "README.md"
 requires-python = ">=3.11"
+license = {text = "Private"}
 dependencies = [
-    "asgiref==3.8.1",
-    "django==5.2.1",
-    "djangorestframework==3.16.0",
-    "drf-nested-routers==0.93.4",
-    "drf-spectacular>=0.28.0",
+    "django>=5.2.1",
+    "djangorestframework>=3.16.0",
+    "django-timezone-field>=7.1",
+    "psycopg2-binary>=2.9.9",
     "gunicorn>=23.0.0",
-    "psycopg2-binary==2.9.10",
-    "requests>=2.32.3",
-    "sqlparse==0.5.3",
-    "tzdata==2025.2",
-    "jinja2>=3.1.6",
-    "celery>=5.3.6",
-    "redis>=5.0.2",
-    "django-celery-beat>=2.5.0",
-    "django-celery-results>=2.5.1",
+    "drf-nested-routers>=0.93.4",
+    "drf-spectacular>=0.28.0",
+    "celery>=5.5.2",
+    "django-celery-results>=2.6.0",
+    "django-celery-beat>=2.8.1",
+    "redis>=6.1.0",
+    # Novas dependências para Etapa 5
+    "pymisp>=2.4.189", # Cliente Python para MISP
+    "python-docx>=1.1.0", # Geração de documentos DOCX
+    "weasyprint>=61.2", # Conversão HTML para PDF
+    "jinja2>=3.1.3", # Engine de templates para relatórios
+    "markdown>=3.6", # Suporte a markdown para relatórios
+    "cryptography>=42.0.7", # Para criptografia de chaves API
+    "uv>=0.7.4",
+    "sync>=1.0.0",
+    "django-filter>=25.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.1.1",
+    "pytest-django>=4.8.0",
+    "black>=24.3.0",
+    "flake8>=7.0.0",
+    "isort>=5.13.2",
 ]
 
 [build-system]

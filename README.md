@@ -1,283 +1,130 @@
-# Multi-Tenant Platform API
+# Plataforma de Resposta a Incidentes
 
-API de gerenciamento para plataforma multi-tenant com controle avançado de usuários, times e organizações.
+## Visão Geral
 
-## Etapa 1: Fundação - Estrutura e Acesso Básico
+Esta é uma plataforma de resposta a incidentes baseada em Django e Django REST Framework. Ela fornece uma API completa para gerenciar alertas, casos, observáveis, tarefas e muito mais.
 
-### Funcionalidades Implementadas
+## Funcionalidades Principais
 
-#### Multi-Tenant Environments
-- ✅ Modelagem de Dados para Organizações
-- ✅ Backend - API para Gerenciamento de Organizações
-- ✅ Modelagem de Dados para Times
-- ✅ Backend - API para Gerenciamento de Times
-- ✅ Lógica de Isolamento de Dados (Initial)
+### Etapa 1: Estrutura Base e Multi-tenancy
+- Sistema multi-tenant com isolamento por organização
+- Gerenciamento de usuários, equipes e permissões
+- API RESTful com autenticação e autorização
 
-#### Advanced User Management
-- ✅ Modelagem de Dados para Perfis de Usuário
-- ✅ Backend - API para Gerenciamento de Usuários
-- ✅ Associação de Usuários a Organizações e Times
-- ✅ Sistema Básico de Autenticação (Token-based)
-- ✅ Modelagem de Dados para Permissões e Papéis
-- ✅ Backend - API para Gerenciamento de Papéis e Atribuição de Permissões
-- ✅ Lógica de Autorização Baseada em Papéis
+### Etapa 2: Gerenciamento de Alertas e Casos
+- Criação e gerenciamento de alertas de segurança
+- Gerenciamento de casos de incidentes
+- Campos customizáveis para alertas e casos
+- Sistema de comentários e histórico de atividades
 
-### Funcionalidades Pendentes
-- ❌ Frontend - UI para Gerenciamento de Organizações
-- ❌ Frontend - UI para Gerenciamento de Times
-- ❌ Frontend - UI para Gerenciamento de Usuários
-- ❌ Frontend - UI para Gerenciamento de Papéis e Permissões
-- ❌ Sincronização de Usuários via LDAP/AD
+### Etapa 3: Observáveis, Timeline e MITRE ATT&CK
+- Gerenciamento de observáveis (IOCs) com suporte a múltiplos tipos
+- Sistema de timeline para documentar eventos de incidentes
+- Integração com framework MITRE ATT&CK
+- Base de conhecimento para documentação e procedimentos
 
-## Etapa 2: Alerta e Gerenciamento de Casos
+### Etapa 4: Comunicação, Automação e Visibilidade
+- Sistema de notificações configurável
+- Automação de tarefas com Celery
+- Métricas e dashboards para visibilidade
+- Agendamento de tarefas periódicas
 
-## Etapa 3: Enriquecimento e Contexto
+### Etapa 5: Integrações Externas e Finalização
+- Integração bidirecional com MISP (Malware Information Sharing Platform)
+- Sistema de geração de relatórios em múltiplos formatos (Markdown, DOCX, PDF)
+- Personalização de templates de relatórios
+- Importação/exportação de indicadores de ameaças
 
-## Etapa 4: Comunicação, Automação e Visibilidade
+## Tecnologias Utilizadas
 
-### Funcionalidades Implementadas
-
-#### Notification Framework (Estrutura de Notificações)
-- ✅ Modelagem de Dados para Notificações (Events, Channels, Rules, Logs)
-- ✅ API para Gerenciamento de Canais de Notificação
-- ✅ API para Gerenciamento de Regras de Notificação
-- ✅ Sistema de Dispatch de Notificações com Condições
-- ✅ Conectores para Múltiplos Canais (Email, Webhook, Slack, Custom HTTP)
-- ✅ Templates para Formatação de Mensagens
-- ✅ Registro de Eventos para Notificações (Case/Alert criação, mudanças de status, etc.)
-- ✅ Teste e Validação de Regras de Notificação
-
-#### Comprehensive APIs (APIs Abrangentes)
-- ✅ API RESTful para Todas as Funcionalidades da Plataforma
-- ✅ Documentação OpenAPI/Swagger
-- ✅ Versionamento de API (/api/v1/...)
-- ✅ Paginação, Filtragem e Ordenação Padrão
-- ✅ Segurança Multi-Tenant Integrada
-- ✅ Consistência em Endpoints e Responses
-- ✅ Suporte a Autenticação por Token
-
-#### Metrics and Dashboards (Métricas e Dashboards)
-- ✅ Modelagem de Dados para Métricas e Snapshots
-- ✅ Modelagem de Dados para Dashboards e Widgets
-- ✅ API para Acesso a Métricas
-- ✅ API para Gerenciamento de Dashboards e Widgets
-- ✅ Sistema de Cálculo Periódico de Métricas
-- ✅ Métricas Padrão para KPIs de Segurança
-- ✅ Serviço para Cálculo de Métricas Customizadas
-
-#### Task Scheduling (Agendamento de Tarefas) com Celery
-- ✅ Processamento Assíncrono de Tarefas
-- ✅ Cálculo Automático de Métricas (Diário, Semanal e Mensal)
-- ✅ Envio Agendado de Notificações de Resumo
-- ✅ Limpeza Automática de Logs Antigos
-- ✅ Dashboard de Administração das Tarefas Agendadas
-
-### Eventos de Notificação Disponíveis
-- `ALERT_CREATED` - Quando um alerta é criado
-- `ALERT_UPDATED` - Quando um alerta é atualizado
-- `CASE_CREATED` - Quando um caso é criado
-- `CASE_UPDATED` - Quando um caso é atualizado
-- `CASE_STATUS_CHANGED` - Quando o status de um caso muda
-- `TASK_CREATED` - Quando uma tarefa é criada
-- `TASK_UPDATED` - Quando uma tarefa é atualizada
-- `TASK_ASSIGNED` - Quando uma tarefa é atribuída a um usuário
-- `COMMENT_ADDED_TO_CASE` - Quando um comentário é adicionado a um caso
-- `COMMENT_ADDED_TO_ALERT` - Quando um comentário é adicionado a um alerta
-- `DAILY_SUMMARY` - Resumo diário enviado automaticamente
-
-### Tarefas Agendadas
-- **Daily Metrics Calculation** - Cálculo diário de métricas (Executa às 01:00 AM)
-- **Weekly Metrics Calculation** - Cálculo semanal de métricas (Executa aos Domingos às 02:00 AM)
-- **Monthly Metrics Calculation** - Cálculo mensal de métricas (Executa no 1º dia do mês às 03:00 AM)
-- **Daily Summary Notification** - Envio de resumo diário (Executa às 01:00 AM)
-- **Clean Old Notification Logs** - Limpeza de logs antigos (Executa a cada 30 dias às 04:00 AM)
-
-### Canais de Notificação Suportados
-- **Webhook** - Envio de notificações para endpoints HTTP externos
-- **Email** - Envio de notificações por email com suporte a templates HTML
-- **Slack** - Envio de notificações para canais do Slack via Incoming Webhooks
-- **Custom HTTP** - Requisições HTTP personalizadas para integrações específicas
-
-### Métricas Padrão Disponíveis
-- **Alert Count** - Número de alertas criados em um período
-- **Alert Severity Distribution** - Distribuição de alertas por severidade
-- **Case Count** - Número de casos criados em um período
-- **Case Severity Distribution** - Distribuição de casos por severidade
-- **Case Status Distribution** - Distribuição de casos por status
-- **Case Resolution Time** - Tempo médio para resolução de casos (em horas)
-- **Task Completion Rate** - Percentual de tarefas concluídas vs. total
-- **Assignee Workload** - Número de casos abertos por responsável
-- **MITRE Technique Frequency** - Técnicas MITRE ATT&CK mais observadas
-- **Observable Type Distribution** - Distribuição de observáveis por tipo
-
-### API de Notificações
-- `GET /api/v1/notification-events/` - Listar eventos de notificação disponíveis
-- `GET /api/v1/notification-channels/` - Listar canais de notificação
-- `POST /api/v1/notification-channels/` - Criar canal de notificação
-- `GET /api/v1/notification-rules/` - Listar regras de notificação
-- `POST /api/v1/notification-rules/` - Criar regra de notificação
-- `POST /api/v1/notifications/trigger-event/` - Disparar evento de notificação manualmente
-- `GET /api/v1/notification-logs/` - Listar logs de notificação
-
-### API de Métricas e Dashboards
-- `GET /api/v1/metrics/` - Listar métricas disponíveis
-- `GET /api/v1/metrics/{id}/data/` - Obter dados de uma métrica específica
-- `GET /api/v1/metric-snapshots/` - Listar snapshots de métricas
-- `GET /api/v1/dashboards/` - Listar dashboards
-- `POST /api/v1/dashboards/` - Criar dashboard
-- `GET /api/v1/dashboard-widgets/` - Listar widgets de dashboard
-- `POST /api/v1/dashboard-widgets/` - Criar widget de dashboard
-
-### Comandos de Gerenciamento
-- `python manage.py create_default_notification_events` - Cria eventos de notificação padrão
-- `python manage.py create_default_metrics` - Cria métricas padrão
-- `python manage.py calculate_metrics [--date YYYY-MM-DD] [--granularity DAILY|WEEKLY|MONTHLY]` - Calcula snapshots de métricas
-- `python manage.py create_default_celery_schedules` - Configura tarefas periódicas padrão do Celery Beat
+- Django 5.2+
+- Django REST Framework 3.16+
+- PostgreSQL (banco de dados)
+- Celery (processamento assíncrono)
+- Redis (message broker e cache)
+- MISP API (integração com threat intelligence)
+- WeasyPrint e python-docx (geração de relatórios)
 
 ## Configuração
 
 ### Requisitos
 - Python 3.11+
-- Django 5.2.1
-- Django REST Framework 3.16.0
-- PostgreSQL (opcional - SQLite disponível)
-- Redis (para Celery)
-- Celery 5.5.2
+- PostgreSQL 13+
+- Redis 6+
 
 ### Instalação
 
-1. Clone o repositório e entre na pasta do projeto
+1. Clone o repositório
+2. Instale as dependências:
 ```
-git clone <url-do-repositorio>
-cd projeto
-```
-
-2. Crie e ative um ambiente virtual
-```
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# Linux/Mac
-source .venv/bin/activate
+pip install uv
+uv venv
+uv pip sync
 ```
 
-3. Instale as dependências
-```
-pip install -r requirements.txt
-```
-
-4. Configure o banco de dados no arquivo .env
-```
-# Para usar SQLite
-USE_SQLITE=1
-
-# Para usar PostgreSQL
-USE_SQLITE=0
-POSTGRES_DB=postgres
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=postgres
-```
-
-5. Execute as migrações
+3. Configure as variáveis de ambiente (veja `.env.example`)
+4. Execute as migrações:
 ```
 python manage.py migrate
 ```
 
-6. Crie um superusuário
+5. Inicialize os dados padrão:
 ```
-python manage.py createsuperuser
+python manage.py shell -c "from api.admin import create_default_data; create_default_data()"
 ```
 
-7. Execute o servidor de desenvolvimento
+6. Execute o servidor:
 ```
 python manage.py runserver
 ```
 
-8. Para inicializar os dados padrão
+### Docker
+
+Também é possível executar a aplicação com Docker:
+
 ```
-bash init_data.sh
-```
-
-9. Para executar o Celery worker
-```
-celery -A core worker -l INFO
-```
-
-10. Para executar o Celery Beat
-```
-celery -A core beat -l INFO --scheduler django_celery_beat.schedulers:DatabaseScheduler
-```
-
-11. Acesse o admin em http://localhost:8000/admin/
-
-## Development with uv
-
-This project uses [uv](https://github.com/astral-sh/uv) as the Python package manager.
-
-### Prerequisites
-
-- Python 3.11+
-- uv
-
-### Installing uv
-
-```bash
-# On macOS and Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# On Windows
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-### Setting up the project
-
-1. Clone the repository:
-   ```bash
-   git clone <repository-url>
-   cd <project-directory>
-   ```
-
-2. Create a virtual environment and install dependencies:
-   ```bash
-   uv venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   uv pip install -e .
-   ```
-
-3. Run migrations:
-   ```bash
-   python manage.py migrate
-   ```
-
-4. Initialize default data:
-   ```bash
-   bash init_data.sh
-   ```
-
-5. Run the development server:
-   ```bash
-   python manage.py runserver
-   ```
-
-### Docker Deployment
-
-The project includes Docker configuration for easy deployment:
-
-```bash
 docker-compose up -d
 ```
 
-This will start the following services:
-- **web**: Django application with Gunicorn
-- **db**: PostgreSQL database
-- **redis**: Redis for Celery broker
-- **celery_worker**: Celery worker for processing tasks
-- **celery_beat**: Celery beat for scheduling tasks
-- **nginx**: Nginx for serving static files
+## Serviços
 
-## API Documentation
+A plataforma consiste em vários serviços:
 
-API documentation is available at:
-- `/api/docs/` - Swagger UI
-- `/api/redoc/` - ReDoc interface
-- `/api/schema/` - Raw OpenAPI schema 
+- **API**: Serviço principal que fornece a API REST
+- **Celery Worker**: Processa tarefas assíncronas
+- **Celery Beat**: Agenda tarefas periódicas
+- **Redis**: Message broker e cache
+- **PostgreSQL**: Banco de dados
+- **Nginx**: Servidor web (em produção)
+
+## Integração MISP
+
+A plataforma suporta integração bidirecional com MISP:
+
+### Importação do MISP
+- Configuração de múltiplas instâncias MISP
+- Importação manual ou automática de eventos
+- Filtragem por tags, data, etc.
+- Conversão automática de atributos MISP para observáveis
+
+### Exportação para MISP
+- Exportação de casos para eventos MISP
+- Configuração de níveis de distribuição, ameaça e análise
+- Adição automática de tags
+
+## Sistema de Relatórios
+
+A plataforma inclui um sistema flexível de geração de relatórios:
+
+- Múltiplos formatos (Markdown, DOCX, PDF)
+- Templates personalizáveis
+- Inclusão seletiva de seções (observáveis, timeline, tarefas, etc.)
+- Geração assíncrona via API
+
+## API
+
+A documentação da API está disponível em `/api/schema/swagger-ui/` quando o servidor está em execução.
+
+## Licença
+
+Este projeto é privado e não possui licença de código aberto. 

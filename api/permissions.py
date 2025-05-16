@@ -57,6 +57,50 @@ class HasRolePermission(permissions.BasePermission):
         
         return False
 
+class HasOrganizationPermission(permissions.BasePermission):
+    """
+    Permissão personalizada para verificar se um usuário pertence à mesma organização
+    do recurso que está tentando acessar.
+    
+    Esta permissão é útil para garantir o isolamento multi-tenant, onde usuários
+    só podem acessar recursos da sua própria organização.
+    """
+    
+    def has_permission(self, request, view):
+        # Administradores do Django têm permissão automática
+        if request.user.is_superuser:
+            return True
+        
+        # Verifica se o usuário tem perfil e organização
+        if not hasattr(request.user, 'profile') or not request.user.profile.organization:
+            return False
+        
+        # Administradores do sistema têm permissão automática
+        if request.user.profile.is_system_admin:
+            return True
+        
+        return True  # A verificação principal acontece em has_object_permission
+    
+    def has_object_permission(self, request, view, obj):
+        # Administradores do Django têm permissão automática
+        if request.user.is_superuser:
+            return True
+        
+        # Verifica se o usuário tem perfil e organização
+        if not hasattr(request.user, 'profile') or not request.user.profile.organization:
+            return False
+        
+        # Administradores do sistema têm permissão automática
+        if request.user.profile.is_system_admin:
+            return True
+        
+        # Verifica se o objeto tem atributo organization
+        if not hasattr(obj, 'organization'):
+            return False
+        
+        # Verifica se a organização do usuário é a mesma do objeto
+        return obj.organization == request.user.profile.organization
+
 class IsOwnerOrHasPermission(permissions.BasePermission):
     """
     Permissão personalizada que permite acesso se o usuário é dono do objeto

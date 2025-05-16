@@ -6,7 +6,8 @@ from .models import (
     CaseSeverity, CaseStatus, CaseTemplate, Case, CaseComment, CaseCustomFieldDefinition, CaseCustomFieldValue,
     TaskStatus, Task, ObservableType, TLPLevel, PAPLevel, Observable, CaseObservable, AlertObservable, AuditLog,
     TimelineEvent, MitreTactic, MitreTechnique, CaseMitreTechnique, AlertMitreTechnique, KBCategory, KBArticleVersion, KBArticle,
-    NotificationEvent, NotificationChannel, NotificationRule, NotificationLog, Metric, MetricSnapshot, DashboardWidget, Dashboard
+    NotificationEvent, NotificationChannel, NotificationRule, NotificationLog, Metric, MetricSnapshot, DashboardWidget, Dashboard,
+    MISPInstance, MISPImport, MISPExport, ReportTemplate, GeneratedReport
 )
 
 class OrganizationSerializer(serializers.ModelSerializer):
@@ -224,13 +225,24 @@ class CaseSerializer(serializers.ModelSerializer):
         read_only_fields = ['case_id', 'created_at', 'updated_at']
 
 class AuditLogSerializer(serializers.ModelSerializer):
-    user = UserSerializer(read_only=True)
-    organization = OrganizationSerializer(read_only=True)
+    user_name = serializers.SerializerMethodField()
+    organization_name = serializers.SerializerMethodField()
     
     class Meta:
         model = AuditLog
-        fields = '__all__'
-        read_only_fields = ['log_id', 'timestamp']
+        fields = ['log_id', 'user', 'user_name', 'organization', 'organization_name', 
+                 'entity_type', 'entity_id', 'action_type', 'timestamp',
+                 'details_before', 'details_after']
+    
+    def get_user_name(self, obj):
+        if obj.user:
+            return f"{obj.user.first_name} {obj.user.last_name}".strip() or obj.user.username
+        return None
+    
+    def get_organization_name(self, obj):
+        if obj.organization:
+            return obj.organization.name
+        return None
 
 # Timeline serializers
 class TimelineEventSerializer(serializers.ModelSerializer):
@@ -446,4 +458,105 @@ class DashboardSerializer(serializers.ModelSerializer):
     def get_created_by_name(self, obj):
         if obj.created_by:
             return f"{obj.created_by.first_name} {obj.created_by.last_name}".strip() or obj.created_by.username
-        return None 
+        return None
+
+# Serializers para Etapa 5: Integrações Externas e Finalização
+
+class MISPInstanceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MISPInstance
+        fields = ['instance_id', 'name', 'url', 'api_key', 'verify_ssl', 
+                  'default_distribution', 'default_threat_level', 'default_analysis',
+                  'import_filter_tags', 'export_default_tags', 'is_active', 
+                  'last_import_timestamp', 'created_at', 'updated_at']
+        extra_kwargs = {
+            'api_key': {'write_only': True}  # Nunca retornar a API key nas responses
+        }
+
+
+class MISPImportSerializer(serializers.ModelSerializer):
+    misp_instance_name = serializers.ReadOnlyField(source='misp_instance.name')
+    imported_by_username = serializers.ReadOnlyField(source='imported_by.username')
+    organization_name = serializers.ReadOnlyField(source='organization.name')
+    
+    class Meta:
+        model = MISPImport
+        fields = ['import_id', 'misp_instance', 'misp_instance_name', 'organization',
+                  'organization_name', 'import_timestamp', 'imported_by', 
+                  'imported_by_username', 'status', 'error_message',
+                  'imported_events_count', 'imported_attributes_count',
+                  'created_alerts_count', 'created_observables_count', 
+                  'updated_observables_count']
+        read_only_fields = ['import_id', 'import_timestamp', 'status', 'error_message',
+                           'imported_events_count', 'imported_attributes_count',
+                           'created_alerts_count', 'created_observables_count',
+                           'updated_observables_count']
+
+
+class MISPExportSerializer(serializers.ModelSerializer):
+    misp_instance_name = serializers.ReadOnlyField(source='misp_instance.name')
+    exported_by_username = serializers.ReadOnlyField(source='exported_by.username')
+    case_title = serializers.ReadOnlyField(source='case.title')
+    
+    class Meta:
+        model = MISPExport
+        fields = ['export_id', 'misp_instance', 'misp_instance_name', 'case', 'case_title',
+                  'misp_event_uuid', 'export_timestamp', 'exported_by', 
+                  'exported_by_username', 'status', 'error_message',
+                  'exported_observables_count']
+        read_only_fields = ['export_id', 'misp_event_uuid', 'export_timestamp', 
+                           'status', 'error_message', 'exported_observables_count']
+
+
+class TriggerMISPImportSerializer(serializers.Serializer):
+    misp_instance_id = serializers.UUIDField()
+    from_timestamp = serializers.DateTimeField(required=False)
+    filter_tags = serializers.ListField(child=serializers.CharField(), required=False)
+    create_alerts = serializers.BooleanField(default=True)
+
+
+class ExportCaseToMISPSerializer(serializers.Serializer):
+    misp_instance_id = serializers.UUIDField()
+    include_observables = serializers.BooleanField(default=True)
+    include_timeline = serializers.BooleanField(default=False)
+    include_mitre_techniques = serializers.BooleanField(default=True)
+    distribution = serializers.IntegerField(required=False)
+    threat_level = serializers.IntegerField(required=False)
+    analysis = serializers.IntegerField(required=False)
+    additional_tags = serializers.ListField(child=serializers.CharField(), required=False)
+
+
+class ReportTemplateSerializer(serializers.ModelSerializer):
+    created_by_username = serializers.ReadOnlyField(source='created_by.username')
+    organization_name = serializers.ReadOnlyField(source='organization.name')
+    
+    class Meta:
+        model = ReportTemplate
+        fields = ['template_id', 'organization', 'organization_name', 'name', 
+                  'description', 'output_format', 'template_content', 
+                  'default_sections', 'is_active', 'created_at', 'updated_at',
+                  'created_by', 'created_by_username']
+        
+
+class GeneratedReportSerializer(serializers.ModelSerializer):
+    case_title = serializers.ReadOnlyField(source='case.title')
+    template_name = serializers.ReadOnlyField(source='template.name')
+    generated_by_username = serializers.ReadOnlyField(source='generated_by.username')
+    
+    class Meta:
+        model = GeneratedReport
+        fields = ['report_id', 'case', 'case_title', 'template', 'template_name',
+                  'generated_by', 'generated_by_username', 'output_format',
+                  'file_path', 'file_size', 'created_at', 'status',
+                  'error_message', 'included_sections']
+        read_only_fields = ['report_id', 'file_path', 'file_size', 'created_at',
+                           'status', 'error_message']
+
+
+class GenerateReportSerializer(serializers.Serializer):
+    template_id = serializers.UUIDField(required=False)
+    output_format = serializers.CharField(required=False)
+    sections = serializers.ListField(child=serializers.CharField(), required=False)
+    include_attachments = serializers.BooleanField(default=False)
+    custom_header = serializers.CharField(required=False)
+    custom_footer = serializers.CharField(required=False) 
