@@ -5,7 +5,8 @@ from .models import (
     AlertSeverity, AlertStatus, Alert, AlertComment, AlertCustomFieldDefinition, AlertCustomFieldValue,
     CaseSeverity, CaseStatus, CaseTemplate, Case, CaseComment, CaseCustomFieldDefinition, CaseCustomFieldValue,
     TaskStatus, Task, ObservableType, TLPLevel, PAPLevel, Observable, CaseObservable, AlertObservable, AuditLog,
-    TimelineEvent, MitreTactic, MitreTechnique, CaseMitreTechnique, AlertMitreTechnique, KBCategory, KBArticleVersion, KBArticle
+    TimelineEvent, MitreTactic, MitreTechnique, CaseMitreTechnique, AlertMitreTechnique, KBCategory, KBArticleVersion, KBArticle,
+    NotificationEvent, NotificationChannel, NotificationRule, NotificationLog, Metric, MetricSnapshot, DashboardWidget, Dashboard
 )
 
 class OrganizationSerializer(serializers.ModelSerializer):
@@ -330,4 +331,119 @@ class KBArticleSerializer(serializers.ModelSerializer):
     def get_category_name(self, obj):
         if obj.category:
             return obj.category.name
+        return None
+
+# Notification Framework serializers
+class NotificationEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NotificationEvent
+        fields = '__all__'
+
+class NotificationChannelSerializer(serializers.ModelSerializer):
+    organization_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = NotificationChannel
+        fields = ['channel_id', 'organization', 'organization_name', 'channel_type', 
+                 'name', 'configuration', 'is_active', 'created_at', 'updated_at']
+        read_only_fields = ['channel_id', 'organization', 'created_at', 'updated_at']
+    
+    def get_organization_name(self, obj):
+        return obj.organization.name if obj.organization else None
+
+class NotificationRuleSerializer(serializers.ModelSerializer):
+    event_name = serializers.SerializerMethodField()
+    channel_name = serializers.SerializerMethodField()
+    organization_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = NotificationRule
+        fields = ['rule_id', 'organization', 'organization_name', 'name', 
+                 'event_type', 'event_name', 'channel', 'channel_name', 
+                 'conditions', 'message_template', 'is_active', 
+                 'created_at', 'updated_at']
+        read_only_fields = ['rule_id', 'organization', 'created_at', 'updated_at']
+    
+    def get_event_name(self, obj):
+        return obj.event_type.event_name if obj.event_type else None
+    
+    def get_channel_name(self, obj):
+        return obj.channel.name if obj.channel else None
+    
+    def get_organization_name(self, obj):
+        return obj.organization.name if obj.organization else None
+
+class NotificationLogSerializer(serializers.ModelSerializer):
+    rule_name = serializers.SerializerMethodField()
+    channel_name = serializers.SerializerMethodField()
+    organization_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = NotificationLog
+        fields = ['log_id', 'rule', 'rule_name', 'channel', 'channel_name', 
+                 'organization', 'organization_name', 'event_payload', 
+                 'sent_at', 'status', 'response_details', 'retry_count']
+        read_only_fields = ['log_id', 'sent_at']
+    
+    def get_rule_name(self, obj):
+        return obj.rule.name if obj.rule else None
+    
+    def get_channel_name(self, obj):
+        return obj.channel.name if obj.channel else None
+    
+    def get_organization_name(self, obj):
+        return obj.organization.name if obj.organization else None
+
+# Metrics and Dashboards serializers
+class MetricSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Metric
+        fields = '__all__'
+
+class MetricSnapshotSerializer(serializers.ModelSerializer):
+    metric_name = serializers.SerializerMethodField()
+    organization_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = MetricSnapshot
+        fields = ['snapshot_id', 'metric', 'metric_name', 'organization', 
+                 'organization_name', 'date', 'granularity', 'dimensions', 'value']
+        read_only_fields = ['snapshot_id']
+    
+    def get_metric_name(self, obj):
+        return obj.metric.display_name if obj.metric else None
+    
+    def get_organization_name(self, obj):
+        return obj.organization.name if obj.organization else None
+
+class DashboardWidgetSerializer(serializers.ModelSerializer):
+    metric_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = DashboardWidget
+        fields = ['widget_id', 'dashboard', 'title', 'widget_type', 
+                 'metric', 'metric_name', 'config', 'position']
+        read_only_fields = ['widget_id']
+    
+    def get_metric_name(self, obj):
+        return obj.metric.display_name if obj.metric else None
+
+class DashboardSerializer(serializers.ModelSerializer):
+    widgets = DashboardWidgetSerializer(many=True, read_only=True)
+    organization_name = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Dashboard
+        fields = ['dashboard_id', 'name', 'description', 'organization', 
+                 'organization_name', 'is_system', 'layout', 'created_by', 
+                 'created_by_name', 'created_at', 'updated_at', 'widgets']
+        read_only_fields = ['dashboard_id', 'created_at', 'updated_at']
+    
+    def get_organization_name(self, obj):
+        return obj.organization.name if obj.organization else None
+    
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            return f"{obj.created_by.first_name} {obj.created_by.last_name}".strip() or obj.created_by.username
         return None 

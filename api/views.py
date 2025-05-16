@@ -13,7 +13,9 @@ from .models import (
     CaseSeverity, CaseStatus, CaseTemplate, Case, CaseComment, CaseCustomFieldDefinition, CaseCustomFieldValue,
     TaskStatus, Task, ObservableType, TLPLevel, PAPLevel, Observable, CaseObservable, AlertObservable, AuditLog,
     TimelineEvent, MitreTactic, MitreTechnique, CaseMitreTechnique, AlertMitreTechnique, 
-    KBCategory, KBArticle, KBArticleVersion
+    KBCategory, KBArticle, KBArticleVersion,
+    NotificationEvent, NotificationChannel, NotificationRule, NotificationLog,
+    Metric, MetricSnapshot, Dashboard, DashboardWidget
 )
 from .serializers import (
     OrganizationSerializer, TeamSerializer, ProfileSerializer, RoleSerializer, PermissionSerializer,
@@ -26,7 +28,11 @@ from .serializers import (
     ObservableSerializer, CaseObservableSerializer, AlertObservableSerializer, AuditLogSerializer,
     TimelineEventSerializer, MitreTacticSerializer, MitreTechniqueSerializer,
     CaseMitreTechniqueSerializer, AlertMitreTechniqueSerializer,
-    KBCategorySerializer, KBArticleSerializer, KBArticleVersionSerializer
+    KBCategorySerializer, KBArticleSerializer, KBArticleVersionSerializer,
+    NotificationEventSerializer, NotificationChannelSerializer,
+    NotificationRuleSerializer, NotificationLogSerializer,
+    MetricSerializer, MetricSnapshotSerializer, 
+    DashboardSerializer, DashboardWidgetSerializer
 )
 from .permissions import HasRolePermission
 import functools
@@ -36,6 +42,7 @@ from datetime import datetime, timedelta
 import json
 import requests
 from django.utils.text import slugify
+from .services import NotificationService, MetricsService
 
 # Decorator para auditoria de ações
 def audit_action(entity_type, action_type, get_entity_id_func=None):
@@ -1738,6 +1745,225 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
             return AuditLog.objects.filter(organization_id=org_id)
         return AuditLog.objects.none()
 
+
+class NotificationEventViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint for notification events (readonly)
+    """
+    queryset = NotificationEvent.objects.all()
+    serializer_class = NotificationEventSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+
+class NotificationChannelViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint for managing notification channels
+    """
+    serializer_class = NotificationChannelSerializer
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'notification:manage'
+    
+    def get_queryset(self):
+        user = self.request.user
+        if hasattr(user, 'profile') and user.profile.organization:
+            return NotificationChannel.objects.filter(organization=user.profile.organization)
+        return NotificationChannel.objects.none()
+    
+    def perform_create(self, serializer):
+        user = self.request.user
+        if hasattr(user, 'profile') and user.profile.organization:
+            serializer.save(organization=user.profile.organization)
+        else:
+            raise PermissionError("User must belong to an organization")
+    
+    @action(detail=True, methods=['post'])
+    def test(self, request, pk=None):
+        """
+        Test a notification channel
+        """
+        channel = self.get_object()
+        
+        # Create a test payload
+        test_payload = {
+            'message': 'This is a test notification',
+            'timestamp': timezone.now().isoformat(),
+            'sender': request.user.username
+        }
+        
+        # Send test notification
+        success, response_details = NotificationService._send_notification(
+            channel=channel, 
+            message="This is a test notification from your Incident Response Platform", 
+            payload=test_payload
+        )
+        
+        return Response({
+            'success': success,
+            'message': 'Test notification sent successfully' if success else 'Failed to send test notification',
+            'details': response_details
+        })
+
+
+class NotificationRuleViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint for managing notification rules
+    """
+    serializer_class = NotificationRuleSerializer
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'notification:manage'
+    
+    def get_queryset(self):
+        user = self.request.user
+        if hasattr(user, 'profile') and user.profile.organization:
+            return NotificationRule.objects.filter(organization=user.profile.organization)
+        return NotificationRule.objects.none()
+    
+    def perform_create(self, serializer):
+        user = self.request.user
+        if hasattr(user, 'profile') and user.profile.organization:
+            serializer.save(organization=user.profile.organization)
+        else:
+            raise PermissionError("User must belong to an organization")
+    
+    @action(detail=True, methods=['post'])
+    def test(self, request, pk=None):
+        """
+        Test a notification rule with a sample payload
+        """
+        rule = self.get_object()
+        
+        # Get or create a test payload
+        test_payload = request.data.get('payload', {})
+        if not test_payload:
+            # Create default test payload based on event type
+            event_name = rule.event_type.event_name
+            if 'ALERT' in event_name:
+                test_payload = {
+                    'alert_id': 'test-alert-id',
+                    'title': 'Test Alert',
+                    'description': 'This is a test alert',
+                    'severity': 'Critical',
+                    'status': 'New',
+                    'created_at': timezone.now().isoformat(),
+                    'organization_id': rule.organization.organization_id,
+                    'organization_name': rule.organization.name,
+                }
+            elif 'CASE' in event_name:
+                test_payload = {
+                    'case_id': 'test-case-id',
+                    'title': 'Test Case',
+                    'description': 'This is a test case',
+                    'severity': 'High',
+                    'status': 'Open',
+                    'created_at': timezone.now().isoformat(),
+                    'organization_id': rule.organization.organization_id,
+                    'organization_name': rule.organization.name,
+                }
+            else:
+                test_payload = {
+                    'event_name': event_name,
+                    'timestamp': timezone.now().isoformat(),
+                    'organization_id': rule.organization.organization_id,
+                    'organization_name': rule.organization.name,
+                    'test': True
+                }
+        
+        # Check conditions
+        conditions_met = NotificationService._evaluate_conditions(rule.conditions, test_payload)
+        
+        # If conditions are met, send test notification
+        if conditions_met:
+            message = NotificationService._render_template(rule.message_template, test_payload) if rule.message_template else json.dumps(test_payload)
+            success, response_details = NotificationService._send_notification(
+                channel=rule.channel, 
+                message=message, 
+                payload=test_payload
+            )
+            
+            return Response({
+                'conditions_met': True,
+                'notification_sent': success,
+                'message': message,
+                'details': response_details
+            })
+        else:
+            return Response({
+                'conditions_met': False,
+                'message': 'Test payload does not meet rule conditions',
+                'rule_conditions': rule.conditions,
+                'test_payload': test_payload
+            })
+
+
+class NotificationLogViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint for viewing notification logs (readonly)
+    """
+    serializer_class = NotificationLogSerializer
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'notification:view'
+    
+    def get_queryset(self):
+        user = self.request.user
+        if hasattr(user, 'profile') and user.profile.organization:
+            return NotificationLog.objects.filter(organization=user.profile.organization)
+        return NotificationLog.objects.none()
+
+
+class NotificationViewSet(viewsets.ViewSet):
+    """
+    ViewSet for triggering notifications manually and testing notification rules
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    
+    @action(detail=False, methods=['post'])
+    def trigger_event(self, request):
+        """
+        Manually trigger a notification event
+        """
+        user = request.user
+        if not hasattr(user, 'profile') or not user.profile.organization:
+            return Response(
+                {'detail': 'User not associated with an organization'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        event_name = request.data.get('event_name')
+        payload = request.data.get('payload', {})
+        
+        if not event_name:
+            return Response(
+                {'detail': 'event_name is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Process the event using the notification service
+            notification_logs = NotificationService.process_event(
+                event_name=event_name,
+                payload=payload,
+                organization=user.profile.organization
+            )
+            
+            if notification_logs:
+                return Response({
+                    'status': 'success',
+                    'message': f'Event processed successfully. {len(notification_logs)} notification(s) sent.',
+                    'notification_logs': notification_logs
+                })
+            else:
+                return Response({
+                    'status': 'info',
+                    'message': 'Event processed, but no matching rules found to trigger notifications.'
+                })
+            
+        except Exception as e:
+            return Response(
+                {'detail': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
 class HelloWorldView(APIView):
     def get(self, request):
         return Response({'message': 'Hello, world!'}, status=status.HTTP_200_OK)
@@ -2506,3 +2732,208 @@ def kb_related_articles(request, entity_type, entity_id):
         'keywords_used': keywords,
         'results': serialized_results
     })
+
+class MetricViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for listing and retrieving metrics.
+    Metrics are system-defined and cannot be modified via API.
+    """
+    queryset = Metric.objects.all()
+    serializer_class = MetricSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    @action(detail=True, methods=['get'])
+    def data(self, request, pk=None):
+        """
+        Get metric data for a specific period
+        """
+        metric = self.get_object()
+        user = request.user
+        
+        if not hasattr(user, 'profile') or not user.profile.organization:
+            return Response(
+                {'detail': 'User not associated with an organization'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Parse query parameters
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+        granularity = request.query_params.get('granularity', 'DAILY')
+        
+        # Parse dimensions from query params
+        dimensions = {}
+        for key, value in request.query_params.items():
+            if key.startswith('dimension_'):
+                dimension_name = key[10:]  # Remove 'dimension_' prefix
+                dimensions[dimension_name] = value
+        
+        # Validate required parameters
+        if not start_date or not end_date:
+            return Response(
+                {'detail': 'start_date and end_date are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Convert string dates to datetime
+            from django.utils.dateparse import parse_date
+            start_date = parse_date(start_date)
+            end_date = parse_date(end_date)
+            
+            if not start_date or not end_date:
+                raise ValueError("Invalid date format")
+            
+            # Get metric data
+            data = MetricsService.get_metric_data(
+                metric=metric,
+                organization=user.profile.organization,
+                start_date=start_date,
+                end_date=end_date,
+                granularity=granularity,
+                dimensions=dimensions
+            )
+            
+            return Response(data)
+            
+        except Exception as e:
+            return Response(
+                {'detail': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+
+class MetricSnapshotViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for retrieving metric snapshots
+    """
+    serializer_class = MetricSnapshotSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        user = self.request.user
+        if hasattr(user, 'profile') and user.profile.organization:
+            return MetricSnapshot.objects.filter(organization=user.profile.organization)
+        return MetricSnapshot.objects.none()
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        
+        # Filter by metric if provided
+        metric_id = self.request.query_params.get('metric_id')
+        if metric_id:
+            queryset = queryset.filter(metric__metric_id=metric_id)
+        
+        # Filter by date range if provided
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+        if start_date:
+            queryset = queryset.filter(date__gte=start_date)
+        if end_date:
+            queryset = queryset.filter(date__lte=end_date)
+        
+        # Filter by granularity if provided
+        granularity = self.request.query_params.get('granularity')
+        if granularity:
+            queryset = queryset.filter(granularity=granularity)
+        
+        return queryset
+
+
+class DashboardViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing dashboards
+    """
+    serializer_class = DashboardSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        user = self.request.user
+        if hasattr(user, 'profile') and user.profile.organization:
+            return Dashboard.objects.filter(
+                models.Q(organization=user.profile.organization) | 
+                models.Q(is_system=True)
+            )
+        return Dashboard.objects.filter(is_system=True)  # Only system dashboards for users without org
+    
+    def perform_create(self, serializer):
+        user = self.request.user
+        if hasattr(user, 'profile') and user.profile.organization:
+            serializer.save(
+                organization=user.profile.organization,
+                created_by=user
+            )
+        else:
+            raise exceptions.PermissionDenied("User must belong to an organization to create dashboards")
+    
+    def perform_update(self, serializer):
+        dashboard = self.get_object()
+        
+        # Prevent updating system dashboards unless user is a system admin
+        if dashboard.is_system and not self.request.user.profile.is_system_admin:
+            raise exceptions.PermissionDenied("Cannot modify system dashboards")
+        
+        serializer.save()
+    
+    def perform_destroy(self, instance):
+        # Prevent deleting system dashboards
+        if instance.is_system:
+            raise exceptions.PermissionDenied("Cannot delete system dashboards")
+        
+        instance.delete()
+
+
+class DashboardWidgetViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing dashboard widgets
+    """
+    serializer_class = DashboardWidgetSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        user = self.request.user
+        if hasattr(user, 'profile') and user.profile.organization:
+            # Get dashboards this user has access to
+            accessible_dashboards = Dashboard.objects.filter(
+                models.Q(organization=user.profile.organization) | 
+                models.Q(is_system=True)
+            ).values_list('dashboard_id', flat=True)
+            
+            return DashboardWidget.objects.filter(dashboard__dashboard_id__in=accessible_dashboards)
+        
+        # User without org can only see widgets from system dashboards
+        system_dashboards = Dashboard.objects.filter(is_system=True).values_list('dashboard_id', flat=True)
+        return DashboardWidget.objects.filter(dashboard__dashboard_id__in=system_dashboards)
+    
+    def perform_create(self, serializer):
+        dashboard = serializer.validated_data.get('dashboard')
+        
+        # Check if user has permission to modify this dashboard
+        user = self.request.user
+        if dashboard.is_system and not user.profile.is_system_admin:
+            raise exceptions.PermissionDenied("Cannot add widgets to system dashboards")
+        
+        if dashboard.organization and (
+            not hasattr(user, 'profile') or 
+            not user.profile.organization or 
+            user.profile.organization.id != dashboard.organization.id
+        ):
+            raise exceptions.PermissionDenied("Cannot add widgets to dashboards from other organizations")
+        
+        serializer.save()
+    
+    def perform_update(self, serializer):
+        widget = self.get_object()
+        
+        # Prevent updating widgets in system dashboards
+        if widget.dashboard.is_system and not self.request.user.profile.is_system_admin:
+            raise exceptions.PermissionDenied("Cannot modify widgets in system dashboards")
+        
+        serializer.save()
+    
+    def perform_destroy(self, instance):
+        # Prevent deleting widgets from system dashboards
+        if instance.dashboard.is_system and not self.request.user.profile.is_system_admin:
+            raise exceptions.PermissionDenied("Cannot delete widgets from system dashboards")
+        
+        instance.delete()

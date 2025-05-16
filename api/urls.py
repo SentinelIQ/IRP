@@ -14,7 +14,10 @@ from .views import (
     CaseMitreTechniqueViewSet, AlertMitreTechniqueViewSet,
     KBCategoryViewSet, KBArticleViewSet,
     HelloWorldView, LoginView, LogoutView, dashboard_stats, reports,
-    import_mitre_attack, kb_search, kb_related_articles
+    import_mitre_attack, kb_search, kb_related_articles,
+    NotificationEventViewSet, NotificationChannelViewSet, NotificationRuleViewSet,
+    NotificationLogViewSet, NotificationViewSet, MetricViewSet, MetricSnapshotViewSet,
+    DashboardViewSet, DashboardWidgetViewSet
 )
 
 router = DefaultRouter()
@@ -74,6 +77,19 @@ cases_router.register(r'custom-fields', CaseCustomFieldValueViewSet, basename='c
 cases_router.register(r'observables', CaseObservableViewSet, basename='case-observables')
 cases_router.register(r'timeline', TimelineEventViewSet, basename='case-timeline')
 cases_router.register(r'mitre-techniques', CaseMitreTechniqueViewSet, basename='case-mitre-techniques')
+
+# Notification routes
+router.register(r'notification-events', NotificationEventViewSet)
+router.register(r'notification-channels', NotificationChannelViewSet, basename='notification-channel')
+router.register(r'notification-rules', NotificationRuleViewSet, basename='notification-rule')
+router.register(r'notification-logs', NotificationLogViewSet, basename='notification-log')
+router.register(r'notifications', NotificationViewSet, basename='notification')
+
+# Metrics and Dashboards routes
+router.register(r'metrics', MetricViewSet)
+router.register(r'metric-snapshots', MetricSnapshotViewSet, basename='metric-snapshot')
+router.register(r'dashboards', DashboardViewSet, basename='dashboard')
+router.register(r'dashboard-widgets', DashboardWidgetViewSet, basename='dashboard-widget')
 
 urlpatterns = [
     path('', include(router.urls)),

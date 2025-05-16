@@ -3,7 +3,11 @@ from .models import (
     Organization, Team, Profile, Role, Permission, UserRole, RolePermission,
     AlertSeverity, AlertStatus, Alert, AlertComment, AlertCustomFieldDefinition, AlertCustomFieldValue,
     CaseSeverity, CaseStatus, CaseTemplate, Case, CaseComment, CaseCustomFieldDefinition, CaseCustomFieldValue,
-    TaskStatus, Task, ObservableType, TLPLevel, PAPLevel, Observable, CaseObservable, AlertObservable, AuditLog
+    TaskStatus, Task, ObservableType, TLPLevel, PAPLevel, Observable, CaseObservable, AlertObservable, AuditLog,
+    TimelineEvent, MitreTactic, MitreTechnique, CaseMitreTechnique, AlertMitreTechnique,
+    KBCategory, KBArticle, KBArticleVersion,
+    NotificationEvent, NotificationChannel, NotificationRule, NotificationLog,
+    Metric, MetricSnapshot, Dashboard, DashboardWidget
 )
 from django.db.models.signals import post_migrate
 from django.dispatch import receiver
@@ -40,6 +44,26 @@ admin.site.register(Observable)
 admin.site.register(CaseObservable)
 admin.site.register(AlertObservable)
 admin.site.register(AuditLog)
+
+# Registrar modelos da Etapa 3 - Enriquecimento e Contexto
+admin.site.register(TimelineEvent)
+admin.site.register(MitreTactic)
+admin.site.register(MitreTechnique)
+admin.site.register(CaseMitreTechnique)
+admin.site.register(AlertMitreTechnique)
+admin.site.register(KBCategory)
+admin.site.register(KBArticle)
+admin.site.register(KBArticleVersion)
+
+# Registrar modelos da Etapa 4 - Comunicação, Automação e Visibilidade
+admin.site.register(NotificationEvent)
+admin.site.register(NotificationChannel)
+admin.site.register(NotificationRule)
+admin.site.register(NotificationLog)
+admin.site.register(Metric)
+admin.site.register(MetricSnapshot)
+admin.site.register(Dashboard)
+admin.site.register(DashboardWidget)
 
 @receiver(post_migrate)
 def create_default_permissions(sender, **kwargs):

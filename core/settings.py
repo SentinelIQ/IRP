@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'rest_framework.authtoken',
+    'drf_spectacular',  # API documentation
     'api',
 ]
 
@@ -145,11 +146,49 @@ STATICFILES_DIRS = [
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': [
+    'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework.authentication.TokenAuthentication',
         'rest_framework.authentication.SessionAuthentication',
-    ],
+    ),
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 20,
+    # Add Schema generation for API documentation
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+# Spectacular settings for API documentation
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Incident Response Platform API',
+    'DESCRIPTION': 'API documentation for Incident Response Platform',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'SCHEMA_PATH_PREFIX': r'/api/v[0-9]',
+    'COMPONENT_SPLIT_REQUEST': True,
+    'SWAGGER_UI_SETTINGS': {
+        'deepLinking': True,
+        'displayRequestDuration': True,
+        'defaultModelsExpandDepth': 3,
+        'defaultModelExpandDepth': 3,
+        'defaultModelRendering': 'model',
+        'displayOperationId': True,
+    },
+    'TAGS': [
+        {'name': 'Organizations', 'description': 'Organization management endpoints'},
+        {'name': 'Users & Roles', 'description': 'User and role management endpoints'},
+        {'name': 'Alerts', 'description': 'Alert management endpoints'},
+        {'name': 'Cases', 'description': 'Case management endpoints'},
+        {'name': 'Tasks', 'description': 'Task management endpoints'},
+        {'name': 'Observables', 'description': 'Observable management endpoints'},
+        {'name': 'Timeline', 'description': 'Timeline event endpoints'},
+        {'name': 'MITRE ATT&CK', 'description': 'MITRE ATT&CK integration endpoints'},
+        {'name': 'Knowledge Base', 'description': 'Knowledge base article endpoints'},
+        {'name': 'Notifications', 'description': 'Notification system endpoints'},
+        {'name': 'Metrics', 'description': 'Metric collection endpoints'},
+        {'name': 'Dashboards', 'description': 'Dashboard management endpoints'},
+    ],
+    'PREPROCESSING_HOOKS': [],
+    'ENUM_NAME_OVERRIDES': {},
 }
