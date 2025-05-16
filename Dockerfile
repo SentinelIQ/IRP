@@ -1,33 +1,40 @@
 FROM python:3.11-slim
 
-WORKDIR /app
-
-# Instala o uv
-RUN pip install --upgrade pip && pip install uv
-
-# Copia arquivos necessários para instalar dependências
-COPY pyproject.toml README.md ./
-
-# Define o modo de linkagem e PATH
-ENV UV_LINK_MODE=copy
-ENV PATH="/app/.venv/bin:$PATH"
-
-# Cria o ambiente virtual antes de instalar dependências
-RUN uv venv .venv
-
-# Copia o restante do código
-COPY . .
-
-# Instala as dependências
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -e .
-
-# Define variáveis do Django
-ENV DJANGO_SETTINGS_MODULE=core.settings
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Coleta arquivos estáticos
-RUN mkdir -p staticfiles && python manage.py collectstatic --noinput
+# Set working directory
+WORKDIR /app
 
-# Executa o projeto com gunicorn
+# Install system dependencies
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc python3-dev libpq-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY pyproject.toml ./
+
+# Install UV if needed
+RUN pip install --no-cache-dir uv
+
+# Install dependencies with UV
+RUN uv pip install -e .
+
+# Copy project
+COPY . .
+
+# Collect static files
+RUN python manage.py collectstatic --noinput
+
+# Create a non-root user
+RUN useradd -m appuser
+RUN chown -R appuser:appuser /app
+USER appuser
+
+# Run entry point for migrations if needed
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+
+# Command to run the application
 CMD ["gunicorn", "core.wsgi:application", "--bind", "0.0.0.0:8000"]

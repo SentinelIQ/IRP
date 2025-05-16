@@ -65,6 +65,13 @@ API de gerenciamento para plataforma multi-tenant com controle avançado de usu�
 - ✅ Métricas Padrão para KPIs de Segurança
 - ✅ Serviço para Cálculo de Métricas Customizadas
 
+#### Task Scheduling (Agendamento de Tarefas) com Celery
+- ✅ Processamento Assíncrono de Tarefas
+- ✅ Cálculo Automático de Métricas (Diário, Semanal e Mensal)
+- ✅ Envio Agendado de Notificações de Resumo
+- ✅ Limpeza Automática de Logs Antigos
+- ✅ Dashboard de Administração das Tarefas Agendadas
+
 ### Eventos de Notificação Disponíveis
 - `ALERT_CREATED` - Quando um alerta é criado
 - `ALERT_UPDATED` - Quando um alerta é atualizado
@@ -76,6 +83,14 @@ API de gerenciamento para plataforma multi-tenant com controle avançado de usu�
 - `TASK_ASSIGNED` - Quando uma tarefa é atribuída a um usuário
 - `COMMENT_ADDED_TO_CASE` - Quando um comentário é adicionado a um caso
 - `COMMENT_ADDED_TO_ALERT` - Quando um comentário é adicionado a um alerta
+- `DAILY_SUMMARY` - Resumo diário enviado automaticamente
+
+### Tarefas Agendadas
+- **Daily Metrics Calculation** - Cálculo diário de métricas (Executa às 01:00 AM)
+- **Weekly Metrics Calculation** - Cálculo semanal de métricas (Executa aos Domingos às 02:00 AM)
+- **Monthly Metrics Calculation** - Cálculo mensal de métricas (Executa no 1º dia do mês às 03:00 AM)
+- **Daily Summary Notification** - Envio de resumo diário (Executa às 01:00 AM)
+- **Clean Old Notification Logs** - Limpeza de logs antigos (Executa a cada 30 dias às 04:00 AM)
 
 ### Canais de Notificação Suportados
 - **Webhook** - Envio de notificações para endpoints HTTP externos
@@ -117,14 +132,17 @@ API de gerenciamento para plataforma multi-tenant com controle avançado de usu�
 - `python manage.py create_default_notification_events` - Cria eventos de notificação padrão
 - `python manage.py create_default_metrics` - Cria métricas padrão
 - `python manage.py calculate_metrics [--date YYYY-MM-DD] [--granularity DAILY|WEEKLY|MONTHLY]` - Calcula snapshots de métricas
+- `python manage.py create_default_celery_schedules` - Configura tarefas periódicas padrão do Celery Beat
 
 ## Configuração
 
 ### Requisitos
-- Python 3.8+
+- Python 3.11+
 - Django 5.2.1
 - Django REST Framework 3.16.0
 - PostgreSQL (opcional - SQLite disponível)
+- Redis (para Celery)
+- Celery 5.5.2
 
 ### Instalação
 
@@ -175,43 +193,22 @@ python manage.py createsuperuser
 python manage.py runserver
 ```
 
-8. Acesse o admin em http://localhost:8000/admin/
+8. Para inicializar os dados padrão
+```
+bash init_data.sh
+```
 
-## API Endpoints
+9. Para executar o Celery worker
+```
+celery -A core worker -l INFO
+```
 
-### Autenticação
-- `POST /api/login/` - Obter token de autenticação
-- `POST /api/logout/` - Invalidar token atual
+10. Para executar o Celery Beat
+```
+celery -A core beat -l INFO --scheduler django_celery_beat.schedulers:DatabaseScheduler
+```
 
-### Organizações
-- `GET /api/organizations/` - Listar organizações
-- `POST /api/organizations/` - Criar organização
-- `GET /api/organizations/{id}/` - Detalhes de uma organização
-- `PUT /api/organizations/{id}/` - Atualizar organização
-- `DELETE /api/organizations/{id}/` - Excluir organização
-
-### Times
-- `GET /api/teams/` - Listar times
-- `POST /api/teams/` - Criar time
-- `GET /api/teams/{id}/` - Detalhes de um time
-- `PUT /api/teams/{id}/` - Atualizar time
-- `DELETE /api/teams/{id}/` - Excluir time
-
-### Usuários
-- `GET /api/users/` - Listar usuários
-- `POST /api/users/` - Criar usuário
-- `GET /api/users/{id}/` - Detalhes de um usuário
-- `PUT /api/users/{id}/` - Atualizar usuário
-- `DELETE /api/users/{id}/` - Excluir usuário
-
-### Papéis e Permissões
-- `GET /api/roles/` - Listar papéis
-- `POST /api/roles/` - Criar papel
-- `GET /api/permissions/` - Listar permissões
-- `GET /api/user-roles/` - Listar associações usuário-papel
-- `POST /api/user-roles/` - Criar associação usuário-papel
-- `GET /api/role-permissions/` - Listar associações papel-permissão
-- `POST /api/role-permissions/` - Criar associação papel-permissão
+11. Acesse o admin em http://localhost:8000/admin/
 
 ## Development with uv
 
@@ -252,16 +249,15 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
    python manage.py migrate
    ```
 
-4. Run the development server:
+4. Initialize default data:
+   ```bash
+   bash init_data.sh
+   ```
+
+5. Run the development server:
    ```bash
    python manage.py runserver
    ```
-
-### Adding new dependencies
-
-```bash
-uv add <package-name>
-```
 
 ### Docker Deployment
 
@@ -271,7 +267,13 @@ The project includes Docker configuration for easy deployment:
 docker-compose up -d
 ```
 
-This will start both the Django application and the PostgreSQL database.
+This will start the following services:
+- **web**: Django application with Gunicorn
+- **db**: PostgreSQL database
+- **redis**: Redis for Celery broker
+- **celery_worker**: Celery worker for processing tasks
+- **celery_beat**: Celery beat for scheduling tasks
+- **nginx**: Nginx for serving static files
 
 ## API Documentation
 
