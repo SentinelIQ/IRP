@@ -11,7 +11,9 @@ from .models import (
     Organization, Team, Profile, Role, Permission, UserRole, RolePermission,
     AlertSeverity, AlertStatus, Alert, AlertComment, AlertCustomFieldDefinition, AlertCustomFieldValue,
     CaseSeverity, CaseStatus, CaseTemplate, Case, CaseComment, CaseCustomFieldDefinition, CaseCustomFieldValue,
-    TaskStatus, Task, ObservableType, TLPLevel, PAPLevel, Observable, CaseObservable, AlertObservable, AuditLog
+    TaskStatus, Task, ObservableType, TLPLevel, PAPLevel, Observable, CaseObservable, AlertObservable, AuditLog,
+    TimelineEvent, MitreTactic, MitreTechnique, CaseMitreTechnique, AlertMitreTechnique, 
+    KBCategory, KBArticle, KBArticleVersion
 )
 from .serializers import (
     OrganizationSerializer, TeamSerializer, ProfileSerializer, RoleSerializer, PermissionSerializer,
@@ -21,13 +23,19 @@ from .serializers import (
     CaseSeveritySerializer, CaseStatusSerializer, CaseTemplateSerializer, CaseSerializer, CaseCommentSerializer,
     CaseCustomFieldDefinitionSerializer, CaseCustomFieldValueSerializer,
     TaskStatusSerializer, TaskSerializer, ObservableTypeSerializer, TLPLevelSerializer, PAPLevelSerializer,
-    ObservableSerializer, CaseObservableSerializer, AlertObservableSerializer, AuditLogSerializer
+    ObservableSerializer, CaseObservableSerializer, AlertObservableSerializer, AuditLogSerializer,
+    TimelineEventSerializer, MitreTacticSerializer, MitreTechniqueSerializer,
+    CaseMitreTechniqueSerializer, AlertMitreTechniqueSerializer,
+    KBCategorySerializer, KBArticleSerializer, KBArticleVersionSerializer
 )
 from .permissions import HasRolePermission
 import functools
 from django.db.models import Count, Q, F, Avg, Min, Max
 from django.db.models.functions import TruncDay, TruncWeek, TruncMonth
 from datetime import datetime, timedelta
+import json
+import requests
+from django.utils.text import slugify
 
 # Decorator para auditoria de ações
 def audit_action(entity_type, action_type, get_entity_id_func=None):
@@ -258,7 +266,37 @@ class AlertViewSet(viewsets.ModelViewSet):
             first_seen_at=timezone.now()
         )
     
-    @action(detail=True, methods=['post'])
+    @audit_action(entity_type='ALERT', action_type='UPDATE')
+    def perform_update(self, serializer):
+        alert = self.get_object()
+        
+        # Capturar estado anterior para auditoria
+        previous_status = alert.status
+        
+        # Realizar a atualização normal
+        serializer.save()
+        
+        # Se status mudou, registrar também como mudança de status
+        if 'status' in serializer.validated_data and previous_status != alert.status:
+            AuditLog.objects.create(
+                user=self.request.user,
+                organization=alert.organization,
+                entity_type='ALERT',
+                entity_id=alert.alert_id,
+                action_type='STATUS_CHANGE',
+                details_before={'status': str(previous_status)},
+                details_after={'status': str(alert.status)}
+            )
+    
+    @audit_action(entity_type='ALERT', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        alert = self.get_object()
+        # Soft delete
+        alert.is_deleted = True
+        alert.save()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    
+    @audit_action(entity_type='ALERT', action_type='ESCALATE')
     def escalate_to_case(self, request, pk=None):
         alert = self.get_object()
         
@@ -439,13 +477,6 @@ class AlertViewSet(viewsets.ModelViewSet):
         
         return Response(serialized_results)
 
-    def destroy(self, request, *args, **kwargs):
-        alert = self.get_object()
-        # Soft delete
-        alert.is_deleted = True
-        alert.save()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
 class AlertCommentViewSet(viewsets.ModelViewSet):
     queryset = AlertComment.objects.all()
     serializer_class = AlertCommentSerializer
@@ -462,6 +493,7 @@ class AlertCommentViewSet(viewsets.ModelViewSet):
                 return AlertComment.objects.filter(alert__alert_id=alert_id, alert__organization_id=org_id)
         return AlertComment.objects.none()
     
+    @audit_action(entity_type='ALERT_COMMENT', action_type='CREATE')
     def perform_create(self, serializer):
         alert_id = self.kwargs.get('alert_pk')
         alert = get_object_or_404(Alert, alert_id=alert_id)
@@ -472,6 +504,14 @@ class AlertCommentViewSet(viewsets.ModelViewSet):
             serializer.save(alert=alert, user=user)
         else:
             raise PermissionError("Usuário não pode comentar neste alerta")
+
+    @audit_action(entity_type='ALERT_COMMENT', action_type='UPDATE')
+    def perform_update(self, serializer):
+        serializer.save()
+    
+    @audit_action(entity_type='ALERT_COMMENT', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
 
 # Etapa 2 - Case Management Views
 
@@ -586,20 +626,122 @@ class CaseViewSet(viewsets.ModelViewSet):
             reporter=user
         )
         
+        # Adicionar evento na timeline
+        create_timeline_event(
+            case=case,
+            organization=user.profile.organization,
+            event_type='CASE_CREATED',
+            description=f"Caso criado por {user.get_full_name() or user.username}",
+            actor=user,
+            metadata={
+                'title': case.title,
+                'severity': str(severity) if severity else None,
+                'status': str(status) if status else None,
+                'template': str(template) if template else None
+            }
+        )
+        
         # Se há um template, processar as tarefas predefinidas
         if template and template.predefined_tasks:
             task_status_todo = TaskStatus.objects.filter(name='ToDo').first()
             
             for task_def in template.predefined_tasks:
-                Task.objects.create(
+                task = Task.objects.create(
                     case=case,
                     title=task_def.get('title', ''),
                     description=task_def.get('description', ''),
                     status=task_status_todo,
                     order=task_def.get('order', 0)
                 )
+                
+                # Adicionar evento na timeline para cada tarefa criada
+                create_timeline_event(
+                    case=case,
+                    organization=user.profile.organization,
+                    event_type='TASK_CREATED',
+                    description=f"Tarefa '{task.title}' criada automaticamente do template",
+                    actor=user,
+                    target_entity_type='Task',
+                    target_entity_id=str(task.task_id)
+                )
         
         return case
+
+    @audit_action(entity_type='CASE', action_type='UPDATE')
+    def perform_update(self, serializer):
+        case = self.get_object()
+        user = self.request.user
+        
+        # Capturar estado anterior para auditoria
+        previous_status = case.status
+        previous_assignee = case.assignee
+        
+        # Realizar a atualização normal
+        serializer.save()
+        
+        # Se status mudou, registrar também como mudança de status
+        if 'status' in serializer.validated_data and previous_status != case.status:
+            # Se o status é terminal, registrar data de fechamento
+            if case.status.is_terminal_status and not case.closed_at:
+                case.closed_at = timezone.now()
+                case.save(update_fields=['closed_at'])
+            
+            AuditLog.objects.create(
+                user=self.request.user,
+                organization=case.organization,
+                entity_type='CASE',
+                entity_id=case.case_id,
+                action_type='STATUS_CHANGE',
+                details_before={'status': str(previous_status)},
+                details_after={'status': str(case.status)}
+            )
+            
+            # Adicionar evento na timeline
+            create_timeline_event(
+                case=case,
+                organization=case.organization,
+                event_type='STATUS_CHANGED',
+                description=f"Status alterado de '{previous_status}' para '{case.status}'",
+                actor=user,
+                metadata={
+                    'old_status': str(previous_status),
+                    'new_status': str(case.status)
+                }
+            )
+        
+        # Se assignee mudou, registrar também como atribuição
+        if 'assignee' in serializer.validated_data and previous_assignee != case.assignee:
+            AuditLog.objects.create(
+                user=self.request.user,
+                organization=case.organization,
+                entity_type='CASE',
+                entity_id=case.case_id,
+                action_type='ASSIGN',
+                details_before={'assignee': str(previous_assignee) if previous_assignee else None},
+                details_after={'assignee': str(case.assignee) if case.assignee else None}
+            )
+            
+            # Adicionar evento na timeline
+            if case.assignee:
+                description = f"Caso atribuído para {case.assignee.get_full_name() or case.assignee.username}"
+            else:
+                description = "Atribuição do caso removida"
+                
+            create_timeline_event(
+                case=case,
+                organization=case.organization,
+                event_type='USER_ASSIGNED',
+                description=description,
+                actor=user,
+                metadata={
+                    'old_assignee': str(previous_assignee) if previous_assignee else None,
+                    'new_assignee': str(case.assignee) if case.assignee else None
+                }
+            )
+    
+    @audit_action(entity_type='CASE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=['get'])
     def related(self, request, pk=None):
@@ -696,19 +838,141 @@ class TaskViewSet(viewsets.ModelViewSet):
                 return Task.objects.filter(case__case_id=case_id, case__organization_id=org_id)
         return Task.objects.none()
     
+    @audit_action(entity_type='TASK', action_type='CREATE')
     def perform_create(self, serializer):
         case_id = self.kwargs.get('case_pk')
         case = get_object_or_404(Case, case_id=case_id)
+        user = self.request.user
         
         # Verificar se o usuário pertence à mesma organização do caso
-        user = self.request.user
         if hasattr(user, 'profile') and user.profile.organization and user.profile.organization == case.organization:
             status_id = self.request.data.get('status_id')
             status = get_object_or_404(TaskStatus, pk=status_id) if status_id else TaskStatus.objects.filter(name='ToDo').first()
             
-            serializer.save(case=case, status=status)
+            task = serializer.save(case=case, status=status)
+            
+            # Adicionar evento na timeline
+            create_timeline_event(
+                case=case,
+                organization=case.organization,
+                event_type='TASK_CREATED',
+                description=f"Tarefa '{task.title}' criada por {user.get_full_name() or user.username}",
+                actor=user,
+                target_entity_type='Task',
+                target_entity_id=str(task.task_id),
+                metadata={
+                    'task_title': task.title,
+                    'task_description': task.description,
+                    'task_status': str(task.status)
+                }
+            )
+            
+            return task
         else:
             raise PermissionError("Usuário não pode criar tarefas neste caso")
+
+    @audit_action(entity_type='TASK', action_type='UPDATE')
+    def perform_update(self, serializer):
+        task = self.get_object()
+        user = self.request.user
+        
+        # Capturar estado anterior para auditoria
+        previous_status = task.status
+        previous_assignee = task.assignee
+        
+        # Realizar a atualização normal
+        serializer.save()
+        
+        # Se status mudou, registrar também como mudança de status
+        if 'status' in serializer.validated_data and previous_status != task.status:
+            AuditLog.objects.create(
+                user=user,
+                organization=task.case.organization,
+                entity_type='TASK',
+                entity_id=task.task_id,
+                action_type='STATUS_CHANGE',
+                details_before={'status': str(previous_status)},
+                details_after={'status': str(task.status)}
+            )
+            
+            # Adicionar evento na timeline
+            event_type = 'TASK_STATUS_CHANGED'
+            description = f"Status da tarefa '{task.title}' alterado de '{previous_status}' para '{task.status}'"
+            
+            # Se o status novo for completo/fechado, usar um evento de tarefa concluída
+            if task.status.name.lower() in ['done', 'completed', 'finished', 'closed']:
+                event_type = 'TASK_COMPLETED'
+                description = f"Tarefa '{task.title}' concluída por {user.get_full_name() or user.username}"
+            
+            create_timeline_event(
+                case=task.case,
+                organization=task.case.organization,
+                event_type=event_type,
+                description=description,
+                actor=user,
+                target_entity_type='Task',
+                target_entity_id=str(task.task_id),
+                metadata={
+                    'task_title': task.title,
+                    'old_status': str(previous_status),
+                    'new_status': str(task.status)
+                }
+            )
+        
+        # Se assignee mudou, registrar também como atribuição
+        if 'assignee' in serializer.validated_data and previous_assignee != task.assignee:
+            AuditLog.objects.create(
+                user=user,
+                organization=task.case.organization,
+                entity_type='TASK',
+                entity_id=task.task_id,
+                action_type='ASSIGN',
+                details_before={'assignee': str(previous_assignee) if previous_assignee else None},
+                details_after={'assignee': str(task.assignee) if task.assignee else None}
+            )
+            
+            # Adicionar evento na timeline
+            if task.assignee:
+                description = f"Tarefa '{task.title}' atribuída para {task.assignee.get_full_name() or task.assignee.username}"
+            else:
+                description = f"Atribuição da tarefa '{task.title}' removida"
+                
+            create_timeline_event(
+                case=task.case,
+                organization=task.case.organization,
+                event_type='TASK_ASSIGNED',
+                description=description,
+                actor=user,
+                target_entity_type='Task',
+                target_entity_id=str(task.task_id),
+                metadata={
+                    'task_title': task.title,
+                    'old_assignee': str(previous_assignee.id) if previous_assignee else None,
+                    'new_assignee': str(task.assignee.id) if task.assignee else None
+                }
+            )
+    
+    @audit_action(entity_type='TASK', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        task = self.get_object()
+        user = request.user
+        
+        # Adicionar evento na timeline antes de excluir
+        create_timeline_event(
+            case=task.case,
+            organization=task.case.organization,
+            event_type='TASK_DELETED',
+            description=f"Tarefa '{task.title}' removida por {user.get_full_name() or user.username}",
+            actor=user,
+            target_entity_type='Task',
+            target_entity_id=str(task.task_id),
+            metadata={
+                'task_title': task.title,
+                'task_status': str(task.status)
+            }
+        )
+        
+        return super().destroy(request, *args, **kwargs)
 
 class CaseCommentViewSet(viewsets.ModelViewSet):
     queryset = CaseComment.objects.all()
@@ -726,16 +990,87 @@ class CaseCommentViewSet(viewsets.ModelViewSet):
                 return CaseComment.objects.filter(case__case_id=case_id, case__organization_id=org_id)
         return CaseComment.objects.none()
     
+    @audit_action(entity_type='CASE_COMMENT', action_type='CREATE')
     def perform_create(self, serializer):
         case_id = self.kwargs.get('case_pk')
         case = get_object_or_404(Case, case_id=case_id)
+        user = self.request.user
         
         # Verificar se o usuário pertence à mesma organização do caso
-        user = self.request.user
         if hasattr(user, 'profile') and user.profile.organization and user.profile.organization == case.organization:
-            serializer.save(case=case, user=user)
+            comment = serializer.save(case=case, user=user)
+            
+            # Adicionar evento na timeline
+            create_timeline_event(
+                case=case,
+                organization=case.organization,
+                event_type='COMMENT_ADDED',
+                description=f"Comentário adicionado por {user.get_full_name() or user.username}",
+                actor=user,
+                target_entity_type='Comment',
+                target_entity_id=str(comment.id),
+                metadata={
+                    'comment_text': comment.text[:100] + ('...' if len(comment.text) > 100 else '')
+                }
+            )
+            
+            return comment
         else:
             raise PermissionError("Usuário não pode comentar neste caso")
+
+    @audit_action(entity_type='CASE_COMMENT', action_type='UPDATE')
+    def perform_update(self, serializer):
+        comment = self.get_object()
+        user = self.request.user
+        case = comment.case
+        
+        # Verificar se é o autor do comentário ou tem permissão especial
+        if comment.user != user and not user.has_perm('case:edit_any_comment'):
+            raise PermissionError("Usuário não pode editar este comentário")
+        
+        updated_comment = serializer.save()
+        
+        # Adicionar evento na timeline
+        create_timeline_event(
+            case=case,
+            organization=case.organization,
+            event_type='COMMENT_UPDATED',
+            description=f"Comentário editado por {user.get_full_name() or user.username}",
+            actor=user,
+            target_entity_type='Comment',
+            target_entity_id=str(comment.id),
+            metadata={
+                'comment_text': updated_comment.text[:100] + ('...' if len(updated_comment.text) > 100 else '')
+            }
+        )
+        
+        return updated_comment
+    
+    @audit_action(entity_type='CASE_COMMENT', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        comment = self.get_object()
+        user = request.user
+        case = comment.case
+        
+        # Verificar se é o autor do comentário ou tem permissão especial
+        if comment.user != user and not user.has_perm('case:delete_any_comment'):
+            raise PermissionError("Usuário não pode excluir este comentário")
+        
+        # Adicionar evento na timeline
+        create_timeline_event(
+            case=case,
+            organization=case.organization,
+            event_type='COMMENT_DELETED',
+            description=f"Comentário excluído por {user.get_full_name() or user.username}",
+            actor=user,
+            target_entity_type='Comment',
+            target_entity_id=str(comment.id),
+            metadata={
+                'comment_text': comment.text[:100] + ('...' if len(comment.text) > 100 else '')
+            }
+        )
+        
+        return super().destroy(request, *args, **kwargs)
 
 # Observables Management Views
 
@@ -757,208 +1092,6 @@ class PAPLevelViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated, HasRolePermission]
     required_permission = 'manage_case_settings'
 
-class ObservableViewSet(viewsets.ModelViewSet):
-    queryset = Observable.objects.all()
-    serializer_class = ObservableSerializer
-    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
-    required_permission = 'observable:view'
-    
-    def get_permissions(self):
-        if self.action == 'create':
-            self.required_permission = 'observable:create'
-        elif self.action in ['update', 'partial_update']:
-            self.required_permission = 'observable:edit'
-        elif self.action == 'destroy':
-            self.required_permission = 'observable:delete'
-        return super().get_permissions()
-
-class CaseObservableViewSet(viewsets.ModelViewSet):
-    queryset = CaseObservable.objects.all()
-    serializer_class = CaseObservableSerializer
-    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
-    required_permission = 'observable:view'
-    
-    def get_permissions(self):
-        if self.action == 'create':
-            self.required_permission = 'observable:create'
-        elif self.action in ['update', 'partial_update']:
-            self.required_permission = 'observable:edit'
-        elif self.action == 'destroy':
-            self.required_permission = 'observable:delete'
-        return super().get_permissions()
-    
-    def get_queryset(self):
-        case_id = self.kwargs.get('case_pk')
-        user = self.request.user
-        
-        if case_id:
-            if hasattr(user, 'profile') and user.profile.organization:
-                org_id = user.profile.organization.organization_id
-                return CaseObservable.objects.filter(case__case_id=case_id, case__organization_id=org_id)
-        return CaseObservable.objects.none()
-    
-    def perform_create(self, serializer):
-        case_id = self.kwargs.get('case_pk')
-        case = get_object_or_404(Case, case_id=case_id)
-        
-        # Verificar se o usuário pertence à mesma organização do caso
-        user = self.request.user
-        if hasattr(user, 'profile') and user.profile.organization and user.profile.organization == case.organization:
-            # Processar os observáveis
-            observable_data = self.request.data
-            
-            # Buscar ou criar o tipo de observável
-            type_id = observable_data.get('type_id')
-            type_obj = get_object_or_404(ObservableType, pk=type_id)
-            
-            # Buscar ou criar o observável
-            value = observable_data.get('value')
-            
-            # Verificar se já existe um observável com este valor e tipo
-            observable, created = Observable.objects.get_or_create(
-                value=value,
-                type=type_obj,
-                defaults={
-                    'description': observable_data.get('description', ''),
-                    'tags': observable_data.get('tags', []),
-                    'is_ioc': observable_data.get('is_ioc', False),
-                    'added_by': user
-                }
-            )
-            
-            # TLP e PAP, se fornecidos
-            tlp_id = observable_data.get('tlp_id')
-            pap_id = observable_data.get('pap_id')
-            
-            if tlp_id:
-                tlp = get_object_or_404(TLPLevel, pk=tlp_id)
-                observable.tlp_level = tlp
-            
-            if pap_id:
-                pap = get_object_or_404(PAPLevel, pk=pap_id)
-                observable.pap_level = pap
-            
-            observable.save()
-            
-            # Associar o observável ao caso
-            serializer.save(
-                case=case,
-                observable=observable,
-                sighted_at=observable_data.get('sighted_at', timezone.now())
-            )
-        else:
-            raise PermissionError("Usuário não pode adicionar observáveis a este caso")
-
-class AlertObservableViewSet(viewsets.ModelViewSet):
-    queryset = AlertObservable.objects.all()
-    serializer_class = AlertObservableSerializer
-    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
-    required_permission = 'observable:view'
-    
-    def get_permissions(self):
-        if self.action == 'create':
-            self.required_permission = 'observable:create'
-        elif self.action in ['update', 'partial_update']:
-            self.required_permission = 'observable:edit'
-        elif self.action == 'destroy':
-            self.required_permission = 'observable:delete'
-        return super().get_permissions()
-    
-    def get_queryset(self):
-        alert_id = self.kwargs.get('alert_pk')
-        user = self.request.user
-        
-        if alert_id:
-            if hasattr(user, 'profile') and user.profile.organization:
-                org_id = user.profile.organization.organization_id
-                return AlertObservable.objects.filter(alert__alert_id=alert_id, alert__organization_id=org_id)
-        return AlertObservable.objects.none()
-    
-    def perform_create(self, serializer):
-        alert_id = self.kwargs.get('alert_pk')
-        alert = get_object_or_404(Alert, alert_id=alert_id)
-        
-        # Verificar se o usuário pertence à mesma organização do alerta
-        user = self.request.user
-        if hasattr(user, 'profile') and user.profile.organization and user.profile.organization == alert.organization:
-            # Processar os observáveis (similar ao CaseObservableViewSet)
-            observable_data = self.request.data
-            
-            # Buscar ou criar o tipo de observável
-            type_id = observable_data.get('type_id')
-            type_obj = get_object_or_404(ObservableType, pk=type_id)
-            
-            # Buscar ou criar o observável
-            value = observable_data.get('value')
-            
-            # Verificar se já existe um observável com este valor e tipo
-            observable, created = Observable.objects.get_or_create(
-                value=value,
-                type=type_obj,
-                defaults={
-                    'description': observable_data.get('description', ''),
-                    'tags': observable_data.get('tags', []),
-                    'is_ioc': observable_data.get('is_ioc', False),
-                    'added_by': user
-                }
-            )
-            
-            # TLP e PAP, se fornecidos
-            tlp_id = observable_data.get('tlp_id')
-            pap_id = observable_data.get('pap_id')
-            
-            if tlp_id:
-                tlp = get_object_or_404(TLPLevel, pk=tlp_id)
-                observable.tlp_level = tlp
-            
-            if pap_id:
-                pap = get_object_or_404(PAPLevel, pk=pap_id)
-                observable.pap_level = pap
-            
-            observable.save()
-            
-            # Associar o observável ao alerta
-            serializer.save(
-                alert=alert,
-                observable=observable,
-                sighted_at=observable_data.get('sighted_at', timezone.now())
-            )
-            
-            # Incrementar contador de artefatos
-            alert.artifact_count += 1
-            alert.save()
-        else:
-            raise PermissionError("Usuário não pode adicionar observáveis a este alerta")
-
-class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = AuditLog.objects.all()
-    serializer_class = AuditLogSerializer
-    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
-    required_permission = 'manage_organizations'  # Permissão de alto nível
-    
-    def get_queryset(self):
-        user = self.request.user
-        if hasattr(user, 'profile') and user.profile.organization:
-            org_id = user.profile.organization.organization_id
-            return AuditLog.objects.filter(organization_id=org_id)
-        return AuditLog.objects.none()
-
-class HelloWorldView(APIView):
-    def get(self, request):
-        return Response({'message': 'Hello, world!'}, status=status.HTTP_200_OK)
-
-class LoginView(ObtainAuthToken):
-    def post(self, request, *args, **kwargs):
-        response = super().post(request, *args, **kwargs)
-        token = Token.objects.get(key=response.data['token'])
-        return Response({'token': token.key, 'user_id': token.user_id})
-
-class LogoutView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-    def post(self, request):
-        request.user.auth_token.delete()
-        return Response(status=status.HTTP_200_OK)
-
 class AlertCustomFieldDefinitionViewSet(viewsets.ModelViewSet):
     queryset = AlertCustomFieldDefinition.objects.all()
     serializer_class = AlertCustomFieldDefinitionSerializer
@@ -973,12 +1106,21 @@ class AlertCustomFieldDefinitionViewSet(viewsets.ModelViewSet):
             return AlertCustomFieldDefinition.objects.filter(organization__isnull=True) | AlertCustomFieldDefinition.objects.filter(organization_id=org_id)
         return AlertCustomFieldDefinition.objects.filter(organization__isnull=True)
     
+    @audit_action(entity_type='ALERT_CUSTOM_FIELD_DEF', action_type='CREATE')
     def perform_create(self, serializer):
         user = self.request.user
         if hasattr(user, 'profile') and user.profile.organization:
             serializer.save(organization=user.profile.organization)
         else:
             serializer.save()
+    
+    @audit_action(entity_type='ALERT_CUSTOM_FIELD_DEF', action_type='UPDATE')
+    def perform_update(self, serializer):
+        serializer.save()
+    
+    @audit_action(entity_type='ALERT_CUSTOM_FIELD_DEF', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
 
 class AlertCustomFieldValueViewSet(viewsets.ModelViewSet):
     queryset = AlertCustomFieldValue.objects.all()
@@ -996,6 +1138,7 @@ class AlertCustomFieldValueViewSet(viewsets.ModelViewSet):
                 return AlertCustomFieldValue.objects.filter(alert__alert_id=alert_id, alert__organization_id=org_id)
         return AlertCustomFieldValue.objects.none()
     
+    @audit_action(entity_type='ALERT_CUSTOM_FIELD_VALUE', action_type='CREATE')
     def perform_create(self, serializer):
         alert_id = self.kwargs.get('alert_pk')
         alert = get_object_or_404(Alert, alert_id=alert_id)
@@ -1012,6 +1155,14 @@ class AlertCustomFieldValueViewSet(viewsets.ModelViewSet):
             )
         else:
             raise PermissionError("Usuário não pode adicionar campos customizados a este alerta")
+    
+    @audit_action(entity_type='ALERT_CUSTOM_FIELD_VALUE', action_type='UPDATE')
+    def perform_update(self, serializer):
+        serializer.save()
+    
+    @audit_action(entity_type='ALERT_CUSTOM_FIELD_VALUE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
 
 class CaseCustomFieldDefinitionViewSet(viewsets.ModelViewSet):
     queryset = CaseCustomFieldDefinition.objects.all()
@@ -1027,12 +1178,21 @@ class CaseCustomFieldDefinitionViewSet(viewsets.ModelViewSet):
             return CaseCustomFieldDefinition.objects.filter(organization__isnull=True) | CaseCustomFieldDefinition.objects.filter(organization_id=org_id)
         return CaseCustomFieldDefinition.objects.filter(organization__isnull=True)
     
+    @audit_action(entity_type='CASE_CUSTOM_FIELD_DEF', action_type='CREATE')
     def perform_create(self, serializer):
         user = self.request.user
         if hasattr(user, 'profile') and user.profile.organization:
             serializer.save(organization=user.profile.organization)
         else:
             serializer.save()
+    
+    @audit_action(entity_type='CASE_CUSTOM_FIELD_DEF', action_type='UPDATE')
+    def perform_update(self, serializer):
+        serializer.save()
+    
+    @audit_action(entity_type='CASE_CUSTOM_FIELD_DEF', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
 
 class CaseCustomFieldValueViewSet(viewsets.ModelViewSet):
     queryset = CaseCustomFieldValue.objects.all()
@@ -1050,6 +1210,7 @@ class CaseCustomFieldValueViewSet(viewsets.ModelViewSet):
                 return CaseCustomFieldValue.objects.filter(case__case_id=case_id, case__organization_id=org_id)
         return CaseCustomFieldValue.objects.none()
     
+    @audit_action(entity_type='CASE_CUSTOM_FIELD_VALUE', action_type='CREATE')
     def perform_create(self, serializer):
         case_id = self.kwargs.get('case_pk')
         case = get_object_or_404(Case, case_id=case_id)
@@ -1066,6 +1227,14 @@ class CaseCustomFieldValueViewSet(viewsets.ModelViewSet):
             )
         else:
             raise PermissionError("Usuário não pode adicionar campos customizados a este caso")
+    
+    @audit_action(entity_type='CASE_CUSTOM_FIELD_VALUE', action_type='UPDATE')
+    def perform_update(self, serializer):
+        serializer.save()
+    
+    @audit_action(entity_type='CASE_CUSTOM_FIELD_VALUE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
 
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated, HasRolePermission])
@@ -1302,3 +1471,1038 @@ def reports(request, report_type=None):
         }
     
     return Response(data)
+
+class ObservableViewSet(viewsets.ModelViewSet):
+    queryset = Observable.objects.all()
+    serializer_class = ObservableSerializer
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'observable:view'
+    
+    def get_permissions(self):
+        if self.action == 'create':
+            self.required_permission = 'observable:create'
+        elif self.action in ['update', 'partial_update']:
+            self.required_permission = 'observable:edit'
+        elif self.action == 'destroy':
+            self.required_permission = 'observable:delete'
+        return super().get_permissions()
+    
+    @audit_action(entity_type='OBSERVABLE', action_type='CREATE')
+    def perform_create(self, serializer):
+        serializer.save()
+    
+    @audit_action(entity_type='OBSERVABLE', action_type='UPDATE')
+    def perform_update(self, serializer):
+        serializer.save()
+    
+    @audit_action(entity_type='OBSERVABLE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
+
+class CaseObservableViewSet(viewsets.ModelViewSet):
+    queryset = CaseObservable.objects.all()
+    serializer_class = CaseObservableSerializer
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'observable:view'
+    
+    def get_permissions(self):
+        if self.action == 'create':
+            self.required_permission = 'observable:create'
+        elif self.action in ['update', 'partial_update']:
+            self.required_permission = 'observable:edit'
+        elif self.action == 'destroy':
+            self.required_permission = 'observable:delete'
+        return super().get_permissions()
+    
+    def get_queryset(self):
+        case_id = self.kwargs.get('case_pk')
+        user = self.request.user
+        
+        if case_id:
+            if hasattr(user, 'profile') and user.profile.organization:
+                org_id = user.profile.organization.organization_id
+                return CaseObservable.objects.filter(case__case_id=case_id, case__organization_id=org_id)
+        return CaseObservable.objects.none()
+    
+    @audit_action(entity_type='CASE_OBSERVABLE', action_type='CREATE')
+    def perform_create(self, serializer):
+        case_id = self.kwargs.get('case_pk')
+        case = get_object_or_404(Case, case_id=case_id)
+        user = self.request.user
+        
+        # Verificar se o usuário pertence à mesma organização do caso
+        if hasattr(user, 'profile') and user.profile.organization and user.profile.organization == case.organization:
+            # Processar os observáveis
+            observable_data = self.request.data
+            
+            # Buscar ou criar o tipo de observável
+            type_id = observable_data.get('type_id')
+            type_obj = get_object_or_404(ObservableType, pk=type_id)
+            
+            # Buscar ou criar o observável
+            value = observable_data.get('value')
+            
+            # Verificar se já existe um observável com este valor e tipo
+            observable, created = Observable.objects.get_or_create(
+                value=value,
+                type=type_obj,
+                defaults={
+                    'description': observable_data.get('description', ''),
+                    'tags': observable_data.get('tags', []),
+                    'is_ioc': observable_data.get('is_ioc', False),
+                    'added_by': user
+                }
+            )
+            
+            # TLP e PAP, se fornecidos
+            tlp_id = observable_data.get('tlp_id')
+            pap_id = observable_data.get('pap_id')
+            
+            if tlp_id:
+                tlp = get_object_or_404(TLPLevel, pk=tlp_id)
+                observable.tlp_level = tlp
+            
+            if pap_id:
+                pap = get_object_or_404(PAPLevel, pk=pap_id)
+                observable.pap_level = pap
+            
+            observable.save()
+            
+            # Associar o observável ao caso
+            case_observable = serializer.save(
+                case=case,
+                observable=observable,
+                sighted_at=observable_data.get('sighted_at', timezone.now())
+            )
+            
+            # Adicionar evento na timeline
+            create_timeline_event(
+                case=case,
+                organization=case.organization,
+                event_type='OBSERVABLE_ADDED',
+                description=f"Observável '{observable.value}' ({observable.type.name}) adicionado por {user.get_full_name() or user.username}",
+                actor=user,
+                target_entity_type='Observable',
+                target_entity_id=str(observable.observable_id),
+                metadata={
+                    'observable_value': observable.value,
+                    'observable_type': observable.type.name,
+                    'is_ioc': observable.is_ioc,
+                    'tlp_level': str(observable.tlp_level) if observable.tlp_level else None,
+                    'pap_level': str(observable.pap_level) if observable.pap_level else None
+                }
+            )
+            
+            return case_observable
+        else:
+            raise PermissionError("Usuário não pode adicionar observáveis a este caso")
+    
+    @audit_action(entity_type='CASE_OBSERVABLE', action_type='UPDATE')
+    def perform_update(self, serializer):
+        serializer.save()
+    
+    @audit_action(entity_type='CASE_OBSERVABLE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        case_observable = self.get_object()
+        user = request.user
+        case = case_observable.case
+        observable = case_observable.observable
+        
+        # Adicionar evento na timeline antes de excluir
+        create_timeline_event(
+            case=case,
+            organization=case.organization,
+            event_type='OBSERVABLE_REMOVED',
+            description=f"Observável '{observable.value}' ({observable.type.name}) removido por {user.get_full_name() or user.username}",
+            actor=user,
+            target_entity_type='Observable',
+            target_entity_id=str(observable.observable_id),
+            metadata={
+                'observable_value': observable.value,
+                'observable_type': observable.type.name
+            }
+        )
+        
+        return super().destroy(request, *args, **kwargs)
+
+class AlertObservableViewSet(viewsets.ModelViewSet):
+    queryset = AlertObservable.objects.all()
+    serializer_class = AlertObservableSerializer
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'observable:view'
+    
+    def get_permissions(self):
+        if self.action == 'create':
+            self.required_permission = 'observable:create'
+        elif self.action in ['update', 'partial_update']:
+            self.required_permission = 'observable:edit'
+        elif self.action == 'destroy':
+            self.required_permission = 'observable:delete'
+        return super().get_permissions()
+    
+    def get_queryset(self):
+        alert_id = self.kwargs.get('alert_pk')
+        user = self.request.user
+        
+        if alert_id:
+            if hasattr(user, 'profile') and user.profile.organization:
+                org_id = user.profile.organization.organization_id
+                return AlertObservable.objects.filter(alert__alert_id=alert_id, alert__organization_id=org_id)
+        return AlertObservable.objects.none()
+    
+    @audit_action(entity_type='ALERT_OBSERVABLE', action_type='CREATE')
+    def perform_create(self, serializer):
+        alert_id = self.kwargs.get('alert_pk')
+        alert = get_object_or_404(Alert, alert_id=alert_id)
+        
+        # Verificar se o usuário pertence à mesma organização do alerta
+        user = self.request.user
+        if hasattr(user, 'profile') and user.profile.organization and user.profile.organization == alert.organization:
+            # Processar os observáveis (similar ao CaseObservableViewSet)
+            observable_data = self.request.data
+            
+            # Buscar ou criar o tipo de observável
+            type_id = observable_data.get('type_id')
+            type_obj = get_object_or_404(ObservableType, pk=type_id)
+            
+            # Buscar ou criar o observável
+            value = observable_data.get('value')
+            
+            # Verificar se já existe um observável com este valor e tipo
+            observable, created = Observable.objects.get_or_create(
+                value=value,
+                type=type_obj,
+                defaults={
+                    'description': observable_data.get('description', ''),
+                    'tags': observable_data.get('tags', []),
+                    'is_ioc': observable_data.get('is_ioc', False),
+                    'added_by': user
+                }
+            )
+            
+            # TLP e PAP, se fornecidos
+            tlp_id = observable_data.get('tlp_id')
+            pap_id = observable_data.get('pap_id')
+            
+            if tlp_id:
+                tlp = get_object_or_404(TLPLevel, pk=tlp_id)
+                observable.tlp_level = tlp
+            
+            if pap_id:
+                pap = get_object_or_404(PAPLevel, pk=pap_id)
+                observable.pap_level = pap
+            
+            observable.save()
+            
+            # Associar o observável ao alerta
+            result = serializer.save(
+                alert=alert,
+                observable=observable,
+                sighted_at=observable_data.get('sighted_at', timezone.now())
+            )
+            
+            # Incrementar contador de artefatos
+            alert.artifact_count += 1
+            alert.save()
+            
+            return result
+        else:
+            raise PermissionError("Usuário não pode adicionar observáveis a este alerta")
+    
+    @audit_action(entity_type='ALERT_OBSERVABLE', action_type='UPDATE')
+    def perform_update(self, serializer):
+        serializer.save()
+    
+    @audit_action(entity_type='ALERT_OBSERVABLE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        alert_observable = self.get_object()
+        alert = alert_observable.alert
+        
+        # Decrementar contador de artefatos
+        if alert.artifact_count > 0:
+            alert.artifact_count -= 1
+            alert.save(update_fields=['artifact_count'])
+        
+        return super().destroy(request, *args, **kwargs)
+
+class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = AuditLog.objects.all()
+    serializer_class = AuditLogSerializer
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'manage_organizations'  # Permissão de alto nível
+    
+    def get_queryset(self):
+        user = self.request.user
+        if hasattr(user, 'profile') and user.profile.organization:
+            org_id = user.profile.organization.organization_id
+            return AuditLog.objects.filter(organization_id=org_id)
+        return AuditLog.objects.none()
+
+class HelloWorldView(APIView):
+    def get(self, request):
+        return Response({'message': 'Hello, world!'}, status=status.HTTP_200_OK)
+
+class LoginView(ObtainAuthToken):
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        token = Token.objects.get(key=response.data['token'])
+        return Response({'token': token.key, 'user_id': token.user_id})
+
+class LogoutView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    def post(self, request):
+        request.user.auth_token.delete()
+        return Response(status=status.HTTP_200_OK)
+
+# Timeline view
+class TimelineEventViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint for retrieving timeline events for a specific case.
+    Timeline events provide a chronological view of all activities related to a case.
+    """
+    queryset = TimelineEvent.objects.all()
+    serializer_class = TimelineEventSerializer
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'case:view'
+    
+    def get_queryset(self):
+        case_id = self.kwargs.get('case_pk')
+        user = self.request.user
+        
+        if case_id:
+            if hasattr(user, 'profile') and user.profile.organization:
+                org_id = user.profile.organization.organization_id
+                return TimelineEvent.objects.filter(
+                    case__case_id=case_id, 
+                    organization_id=org_id
+                ).order_by('-occurred_at')
+        return TimelineEvent.objects.none()
+
+# Function to automatically create timeline events
+def create_timeline_event(case, organization, event_type, description, actor, 
+                         target_entity_type=None, target_entity_id=None, metadata=None):
+    """
+    Helper function to create timeline events.
+    This should be called whenever a significant action happens in a case.
+    """
+    TimelineEvent.objects.create(
+        case=case,
+        organization=organization,
+        event_type=event_type,
+        description=description,
+        actor=actor,
+        target_entity_type=target_entity_type,
+        target_entity_id=target_entity_id,
+        metadata=metadata or {}
+    )
+
+# MITRE ATT&CK views
+class MitreTacticViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint for retrieving MITRE ATT&CK tactics.
+    This provides read-only access to the tactics imported from the MITRE ATT&CK framework.
+    """
+    queryset = MitreTactic.objects.all()
+    serializer_class = MitreTacticSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        queryset = MitreTactic.objects.all()
+        
+        # Filter by version if provided
+        version = self.request.query_params.get('version', None)
+        if version:
+            queryset = queryset.filter(version=version)
+            
+        return queryset.order_by('name')
+
+class MitreTechniqueViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint for retrieving MITRE ATT&CK techniques.
+    This provides read-only access to the techniques imported from the MITRE ATT&CK framework.
+    """
+    queryset = MitreTechnique.objects.all()
+    serializer_class = MitreTechniqueSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        queryset = MitreTechnique.objects.all()
+        
+        # Apply filters based on query parameters
+        tactic_id = self.request.query_params.get('tactic_id', None)
+        is_subtechnique = self.request.query_params.get('is_subtechnique', None)
+        version = self.request.query_params.get('version', None)
+        search = self.request.query_params.get('search', None)
+        
+        if tactic_id:
+            queryset = queryset.filter(tactics__tactic_id=tactic_id)
+        
+        if is_subtechnique is not None:
+            is_sub = is_subtechnique.lower() in ['true', '1', 'yes']
+            queryset = queryset.filter(is_subtechnique=is_sub)
+        
+        if version:
+            queryset = queryset.filter(version=version)
+            
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) | 
+                Q(technique_id__icontains=search) |
+                Q(description__icontains=search)
+            )
+            
+        return queryset.order_by('technique_id')
+
+class CaseMitreTechniqueViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint for managing MITRE ATT&CK techniques associated with cases.
+    """
+    queryset = CaseMitreTechnique.objects.all()
+    serializer_class = CaseMitreTechniqueSerializer
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'case:edit'
+    
+    def get_queryset(self):
+        case_id = self.kwargs.get('case_pk')
+        user = self.request.user
+        
+        if case_id:
+            if hasattr(user, 'profile') and user.profile.organization:
+                org_id = user.profile.organization.organization_id
+                return CaseMitreTechnique.objects.filter(
+                    case__case_id=case_id, 
+                    case__organization_id=org_id
+                )
+        return CaseMitreTechnique.objects.none()
+    
+    @audit_action(entity_type='CASE_MITRE_TECHNIQUE', action_type='CREATE')
+    def perform_create(self, serializer):
+        case_id = self.kwargs.get('case_pk')
+        case = get_object_or_404(Case, case_id=case_id)
+        user = self.request.user
+        
+        # Verificar se o usuário pertence à mesma organização do caso
+        if not hasattr(user, 'profile') or not user.profile.organization or user.profile.organization != case.organization:
+            raise PermissionError("Usuário não pode adicionar técnicas MITRE ATT&CK a este caso")
+        
+        technique_id = self.request.data.get('technique_id')
+        technique = get_object_or_404(MitreTechnique, technique_id=technique_id)
+        
+        # Salvar a associação
+        case_technique = serializer.save(
+            case=case,
+            technique=technique,
+            linked_by=user
+        )
+        
+        # Adicionar evento na timeline
+        create_timeline_event(
+            case=case,
+            organization=case.organization,
+            event_type='MITRE_TTP_LINKED',
+            description=f"Técnica MITRE ATT&CK '{technique.name}' ({technique.technique_id}) associada ao caso",
+            actor=user,
+            target_entity_type='MitreTechnique',
+            target_entity_id=technique.technique_id
+        )
+        
+        return case_technique
+    
+    @audit_action(entity_type='CASE_MITRE_TECHNIQUE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        case_mitre = self.get_object()
+        case = case_mitre.case
+        technique = case_mitre.technique
+        user = request.user
+        
+        # Adicionar evento na timeline antes de excluir
+        create_timeline_event(
+            case=case,
+            organization=case.organization,
+            event_type='MITRE_TTP_UNLINKED',
+            description=f"Técnica MITRE ATT&CK '{technique.name}' ({technique.technique_id}) removida do caso",
+            actor=user,
+            target_entity_type='MitreTechnique',
+            target_entity_id=technique.technique_id
+        )
+        
+        return super().destroy(request, *args, **kwargs)
+
+class AlertMitreTechniqueViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint for managing MITRE ATT&CK techniques associated with alerts.
+    """
+    queryset = AlertMitreTechnique.objects.all()
+    serializer_class = AlertMitreTechniqueSerializer
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'alert:edit'
+    
+    def get_queryset(self):
+        alert_id = self.kwargs.get('alert_pk')
+        user = self.request.user
+        
+        if alert_id:
+            if hasattr(user, 'profile') and user.profile.organization:
+                org_id = user.profile.organization.organization_id
+                return AlertMitreTechnique.objects.filter(
+                    alert__alert_id=alert_id, 
+                    alert__organization_id=org_id
+                )
+        return AlertMitreTechnique.objects.none()
+    
+    @audit_action(entity_type='ALERT_MITRE_TECHNIQUE', action_type='CREATE')
+    def perform_create(self, serializer):
+        alert_id = self.kwargs.get('alert_pk')
+        alert = get_object_or_404(Alert, alert_id=alert_id)
+        user = self.request.user
+        
+        # Verificar se o usuário pertence à mesma organização do alerta
+        if not hasattr(user, 'profile') or not user.profile.organization or user.profile.organization != alert.organization:
+            raise PermissionError("Usuário não pode adicionar técnicas MITRE ATT&CK a este alerta")
+        
+        technique_id = self.request.data.get('technique_id')
+        technique = get_object_or_404(MitreTechnique, technique_id=technique_id)
+        
+        # Salvar a associação
+        return serializer.save(
+            alert=alert,
+            technique=technique,
+            linked_by=user
+        )
+    
+    
+    @audit_action(entity_type='ALERT_MITRE_TECHNIQUE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated, HasRolePermission])
+def import_mitre_attack(request):
+    """
+    Endpoint para importar ou atualizar os dados do MITRE ATT&CK.
+    Este endpoint pode baixar o arquivo STIX do repositório MITRE CTI ou
+    processar um arquivo STIX enviado pelo usuário.
+    """
+    # Verificar permissão
+    if not request.user.has_perm('manage_mitre_data'):
+        return Response({"error": "Sem permissão para importar dados MITRE ATT&CK"}, 
+                        status=status.HTTP_403_FORBIDDEN)
+    
+    try:
+        # Parâmetros da importação
+        url = request.data.get('stix_url')
+        version = request.data.get('version', 'current')
+        file_data = request.data.get('stix_data')
+        
+        if url:
+            # Baixar o arquivo STIX da URL fornecida
+            response = requests.get(url)
+            stix_data = response.json()
+        elif file_data:
+            # Usar o arquivo STIX fornecido
+            if isinstance(file_data, str):
+                stix_data = json.loads(file_data)
+            else:
+                stix_data = file_data
+        else:
+            # URL padrão do repositório MITRE CTI para Enterprise
+            default_url = f"https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json"
+            response = requests.get(default_url)
+            stix_data = response.json()
+        
+        # Processar os dados STIX
+        tactics_created = 0
+        techniques_created = 0
+        relationships_created = 0
+        
+        # Extrair versão dos dados se não fornecida
+        if not version or version == 'current':
+            for obj in stix_data.get('objects', []):
+                if obj.get('type') == 'x-mitre-matrix':
+                    version = obj.get('name', '').split('-')[-1].strip() or 'unknown'
+                    break
+        
+        # Processar táticas
+        tactics = {}
+        for obj in stix_data.get('objects', []):
+            if obj.get('type') == 'x-mitre-tactic':
+                tactic_id = obj.get('external_references', [{}])[0].get('external_id', '')
+                if tactic_id.startswith('TA'):
+                    name = obj.get('name', '')
+                    description = obj.get('description', '')
+                    url = obj.get('external_references', [{}])[0].get('url', '')
+                    
+                    tactic, created = MitreTactic.objects.update_or_create(
+                        tactic_id=tactic_id,
+                        defaults={
+                            'name': name,
+                            'description': description,
+                            'url': url,
+                            'version': version
+                        }
+                    )
+                    
+                    tactics[obj.get('id')] = tactic
+                    if created:
+                        tactics_created += 1
+        
+        # Processar técnicas
+        techniques = {}
+        for obj in stix_data.get('objects', []):
+            if obj.get('type') == 'attack-pattern':
+                technique_id = obj.get('external_references', [{}])[0].get('external_id', '')
+                if technique_id.startswith('T'):
+                    name = obj.get('name', '')
+                    description = obj.get('description', '')
+                    url = obj.get('external_references', [{}])[0].get('url', '')
+                    is_subtechnique = '.' in technique_id
+                    
+                    # Parent technique ID para subtécnicas
+                    parent_technique = None
+                    if is_subtechnique:
+                        parent_id = technique_id.split('.')[0]
+                        parent_technique = MitreTechnique.objects.filter(technique_id=parent_id).first()
+                    
+                    technique, created = MitreTechnique.objects.update_or_create(
+                        technique_id=technique_id,
+                        defaults={
+                            'name': name,
+                            'description': description,
+                            'url': url,
+                            'is_subtechnique': is_subtechnique,
+                            'parent_technique': parent_technique,
+                            'version': version
+                        }
+                    )
+                    
+                    techniques[obj.get('id')] = technique
+                    if created:
+                        techniques_created += 1
+        
+        # Processar relacionamentos entre técnicas e táticas
+        for obj in stix_data.get('objects', []):
+            if obj.get('type') == 'relationship' and obj.get('relationship_type') == 'uses':
+                source_ref = obj.get('source_ref')
+                target_ref = obj.get('target_ref')
+                
+                if source_ref in techniques and target_ref in tactics:
+                    technique = techniques[source_ref]
+                    tactic = tactics[target_ref]
+                    
+                    # Criar relacionamento
+                    rel, created = TechniqueTactic.objects.get_or_create(
+                        technique=technique,
+                        tactic=tactic
+                    )
+                    
+                    if created:
+                        relationships_created += 1
+        
+        return Response({
+            'success': True,
+            'version': version,
+            'tactics_created_or_updated': tactics_created,
+            'techniques_created_or_updated': techniques_created,
+            'technique_tactic_relationships_created': relationships_created
+        })
+        
+    except Exception as e:
+        return Response({
+            'error': f"Erro ao importar dados MITRE ATT&CK: {str(e)}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+# Knowledge Base views
+class KBCategoryViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint for managing knowledge base categories.
+    """
+    queryset = KBCategory.objects.all()
+    serializer_class = KBCategorySerializer
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'kb:manage_categories'
+    
+    def get_queryset(self):
+        user = self.request.user
+        
+        if hasattr(user, 'profile') and user.profile.organization:
+            org_id = user.profile.organization.organization_id
+            # Return global categories (organization=None) and org-specific categories
+            return KBCategory.objects.filter(
+                Q(organization__isnull=True) | Q(organization_id=org_id)
+            )
+        return KBCategory.objects.filter(organization__isnull=True)
+    
+    def perform_create(self, serializer):
+        user = self.request.user
+        if hasattr(user, 'profile') and user.profile.organization:
+            serializer.save(organization=user.profile.organization)
+        else:
+            serializer.save()
+
+class KBArticleViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint for managing knowledge base articles.
+    """
+    queryset = KBArticle.objects.all()
+    serializer_class = KBArticleSerializer
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'kb:view'
+    lookup_field = 'slug'
+    lookup_url_kwarg = 'slug_or_id'
+    
+    def get_permissions(self):
+        if self.action == 'create':
+            self.required_permission = 'kb:create'
+        elif self.action in ['update', 'partial_update']:
+            self.required_permission = 'kb:edit'
+        elif self.action == 'destroy':
+            self.required_permission = 'kb:delete'
+        elif self.action == 'publish':
+            self.required_permission = 'kb:publish'
+        return super().get_permissions()
+    
+    def get_queryset(self):
+        user = self.request.user
+        
+        if hasattr(user, 'profile') and user.profile.organization:
+            org_id = user.profile.organization.organization_id
+            # Return global articles (organization=None) and org-specific articles
+            queryset = KBArticle.objects.filter(
+                Q(organization__isnull=True) | Q(organization_id=org_id)
+            )
+            
+            # Filter by status if specified
+            status_param = self.request.query_params.get('status', None)
+            if status_param:
+                statuses = status_param.split(',')
+                queryset = queryset.filter(status__in=statuses)
+            elif not self.detail:
+                # By default, only show published articles in list view
+                queryset = queryset.filter(status='PUBLISHED')
+            
+            # Filter by category if specified
+            category_id = self.request.query_params.get('category_id', None)
+            if category_id:
+                queryset = queryset.filter(category_id=category_id)
+            
+            # Filter by search term if specified
+            search = self.request.query_params.get('search', None)
+            if search:
+                queryset = queryset.filter(
+                    Q(title__icontains=search) | 
+                    Q(content__icontains=search) |
+                    Q(tags__contains=[search])
+                )
+            
+            return queryset.order_by('-updated_at')
+        
+        # For users without organization, only show global published articles
+        return KBArticle.objects.filter(
+            organization__isnull=True,
+            status='PUBLISHED'
+        )
+    
+    def get_object(self):
+        queryset = self.get_queryset()
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        lookup_value = self.kwargs[lookup_url_kwarg]
+        
+        # Try to find by UUID first
+        try:
+            if '-' in lookup_value:
+                return queryset.get(article_id=lookup_value)
+        except (KBArticle.DoesNotExist, ValueError):
+            pass
+        
+        # Then by slug
+        obj = get_object_or_404(queryset, slug=lookup_value)
+        self.check_object_permissions(self.request, obj)
+        return obj
+    
+    @audit_action(entity_type='KB_ARTICLE', action_type='CREATE')
+    def perform_create(self, serializer):
+        user = self.request.user
+        
+        if not hasattr(user, 'profile') or not user.profile.organization:
+            raise PermissionError("Usuário não possui organização")
+        
+        # Criar o artigo
+        article = serializer.save(
+            author=user,
+            organization=user.profile.organization
+        )
+        
+        # Criar versão inicial
+        KBArticleVersion.objects.create(
+            article=article,
+            version_number=1,
+            title=article.title,
+            content=article.content,
+            author=user
+        )
+        
+        return article
+    
+    @audit_action(entity_type='KB_ARTICLE', action_type='UPDATE')
+    def perform_update(self, serializer):
+        user = self.request.user
+        article = self.get_object()
+        
+        # Verificar se o conteúdo ou título mudou
+        content_changed = 'content' in serializer.validated_data and serializer.validated_data['content'] != article.content
+        title_changed = 'title' in serializer.validated_data and serializer.validated_data['title'] != article.title
+        
+        # Se mudou conteúdo ou título, incrementar versão
+        if content_changed or title_changed:
+            new_version = article.version + 1
+            serializer.save(version=new_version)
+            
+            # Criar entrada na tabela de versões
+            KBArticleVersion.objects.create(
+                article=article,
+                version_number=new_version,
+                title=serializer.validated_data.get('title', article.title),
+                content=serializer.validated_data.get('content', article.content),
+                author=user
+            )
+        else:
+            serializer.save()
+    
+    @audit_action(entity_type='KB_ARTICLE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        article = self.get_object()
+        
+        # Mudar status para ARCHIVED em vez de excluir
+        article.status = 'ARCHIVED'
+        article.save()
+        
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    
+    @action(detail=True, methods=['post'])
+    @audit_action(entity_type='KB_ARTICLE', action_type='PUBLISH')
+    def publish(self, request, slug_or_id=None):
+        """
+        Action para publicar um artigo.
+        """
+        article = self.get_object()
+        
+        # Verificar se já está publicado
+        if article.status == 'PUBLISHED':
+            return Response({"detail": "Artigo já está publicado"}, 
+                           status=status.HTTP_400_BAD_REQUEST)
+        
+        # Atualizar status e data de publicação
+        article.status = 'PUBLISHED'
+        article.published_at = timezone.now()
+        article.save()
+        
+        serializer = self.get_serializer(article)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['get'])
+    def versions(self, request, slug_or_id=None):
+        """
+        Action para listar versões de um artigo.
+        """
+        article = self.get_object()
+        versions = article.versions.all().order_by('-version_number')
+        
+        page = self.paginate_queryset(versions)
+        if page is not None:
+            serializer = KBArticleVersionSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = KBArticleVersionSerializer(versions, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['get'], url_path='versions/(?P<version_number>\d+)')
+    def get_version(self, request, slug_or_id=None, version_number=None):
+        """
+        Action para obter uma versão específica de um artigo.
+        """
+        article = self.get_object()
+        
+        try:
+            version = article.versions.get(version_number=version_number)
+        except KBArticleVersion.DoesNotExist:
+            return Response({"detail": "Versão não encontrada"}, 
+                          status=status.HTTP_404_NOT_FOUND)
+        
+        serializer = KBArticleVersionSerializer(version)
+        return Response(serializer.data)
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def kb_search(request):
+    """
+    Endpoint para busca avançada na base de conhecimento.
+    """
+    user = request.user
+    search_term = request.query_params.get('q', '')
+    
+    if not search_term:
+        return Response({"detail": "Parâmetro de busca 'q' é obrigatório"}, 
+                       status=status.HTTP_400_BAD_REQUEST)
+    
+    # Buscar artigos visíveis para o usuário
+    if hasattr(user, 'profile') and user.profile.organization:
+        org_id = user.profile.organization.organization_id
+        queryset = KBArticle.objects.filter(
+            Q(organization__isnull=True) | Q(organization_id=org_id),
+            status='PUBLISHED'
+        )
+    else:
+        queryset = KBArticle.objects.filter(
+            organization__isnull=True,
+            status='PUBLISHED'
+        )
+    
+    # Busca em título, conteúdo e tags
+    results = queryset.filter(
+        Q(title__icontains=search_term) | 
+        Q(content__icontains=search_term) |
+        Q(tags__contains=[search_term])
+    ).order_by('-updated_at')
+    
+    # Limitar resultados
+    limit = int(request.query_params.get('limit', 20))
+    results = results[:limit]
+    
+    # Serializar resultados
+    serializer = KBArticleSerializer(results, many=True)
+    
+    return Response({
+        'count': len(results),
+        'results': serializer.data
+    })
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def kb_related_articles(request, entity_type, entity_id):
+    """
+    Endpoint para sugerir artigos da base de conhecimento relacionados 
+    a um caso, alerta ou outro objeto com base em palavras-chave.
+    """
+    user = request.user
+    
+    # Obter o objeto relacionado
+    if entity_type.lower() == 'case':
+        try:
+            entity = Case.objects.get(case_id=entity_id)
+            keywords = []
+            
+            # Extrair palavras-chave do título e descrição
+            if entity.title:
+                keywords.extend(entity.title.lower().split())
+            if entity.description:
+                keywords.extend(entity.description.lower().split())
+                
+            # Adicionar outros termos relevantes como severidade, status, etc.
+            if entity.severity:
+                keywords.append(entity.severity.name.lower())
+            if entity.status:
+                keywords.append(entity.status.name.lower())
+                
+        except Case.DoesNotExist:
+            return Response({"detail": "Caso não encontrado"}, 
+                           status=status.HTTP_404_NOT_FOUND)
+    
+    elif entity_type.lower() == 'alert':
+        try:
+            entity = Alert.objects.get(alert_id=entity_id)
+            keywords = []
+            
+            # Extrair palavras-chave do título e descrição
+            if entity.title:
+                keywords.extend(entity.title.lower().split())
+            if entity.description:
+                keywords.extend(entity.description.lower().split())
+                
+            # Adicionar outros termos relevantes
+            if entity.severity:
+                keywords.append(entity.severity.name.lower())
+            if entity.status:
+                keywords.append(entity.status.name.lower())
+            if entity.source_system:
+                keywords.append(entity.source_system.lower())
+                
+        except Alert.DoesNotExist:
+            return Response({"detail": "Alerta não encontrado"}, 
+                           status=status.HTTP_404_NOT_FOUND)
+    else:
+        return Response({"detail": "Tipo de entidade não suportado"}, 
+                       status=status.HTTP_400_BAD_REQUEST)
+    
+    # Filtrar palavras-chave (remover preposições, artigos, etc.)
+    stopwords = ['a', 'o', 'e', 'de', 'do', 'da', 'em', 'no', 'na', 'para', 'com', 'por']
+    keywords = [k for k in keywords if len(k) > 3 and k not in stopwords]
+    
+    # Limite de palavras-chave
+    keywords = keywords[:10]
+    
+    # Buscar artigos visíveis para o usuário
+    if hasattr(user, 'profile') and user.profile.organization:
+        org_id = user.profile.organization.organization_id
+        queryset = KBArticle.objects.filter(
+            Q(organization__isnull=True) | Q(organization_id=org_id),
+            status='PUBLISHED'
+        )
+    else:
+        queryset = KBArticle.objects.filter(
+            organization__isnull=True,
+            status='PUBLISHED'
+        )
+    
+    # Buscar artigos relacionados com as palavras-chave
+    results = []
+    for keyword in keywords:
+        articles = queryset.filter(
+            Q(title__icontains=keyword) | 
+            Q(content__icontains=keyword) |
+            Q(tags__contains=[keyword])
+        )
+        
+        for article in articles:
+            # Adicionar score de relevância baseado no número de keywords encontradas
+            score = 0
+            for k in keywords:
+                if k in article.title.lower():
+                    score += 3  # Peso maior para matches no título
+                if k in article.content.lower():
+                    score += 1  # Peso menor para matches no conteúdo
+                if article.tags and k in [t.lower() for t in article.tags]:
+                    score += 2  # Peso médio para matches nas tags
+            
+            # Adicionar à lista de resultados se tiver score mínimo
+            if score > 0:
+                result = {
+                    'article': article,
+                    'score': score
+                }
+                
+                # Verificar se já está nos resultados
+                existing = next((r for r in results if r['article'].article_id == article.article_id), None)
+                if existing:
+                    # Atualizar score se for maior
+                    if score > existing['score']:
+                        existing['score'] = score
+                else:
+                    results.append(result)
+    
+    # Ordenar por score e limitar resultados
+    results = sorted(results, key=lambda x: x['score'], reverse=True)[:5]
+    
+    # Serializar resultados
+    serialized_results = []
+    for result in results:
+        article_data = KBArticleSerializer(result['article']).data
+        serialized_results.append({
+            'article': article_data,
+            'relevance_score': result['score']
+        })
+    
+    return Response({
+        'count': len(serialized_results),
+        'keywords_used': keywords,
+        'results': serialized_results
+    })

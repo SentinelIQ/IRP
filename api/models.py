@@ -2,6 +2,7 @@ from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
 import uuid
+from django.utils.text import slugify
 
 # Create your models here.
 
@@ -386,3 +387,153 @@ class AuditLog(models.Model):
     
     def __str__(self):
         return f"{self.action_type} on {self.entity_type} by {self.user.username if self.user else 'Unknown'}"
+
+# Timeline models
+class TimelineEvent(models.Model):
+    event_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    case = models.ForeignKey('Case', related_name='timeline_events', on_delete=models.CASCADE)
+    organization = models.ForeignKey('Organization', related_name='timeline_events', on_delete=models.CASCADE)
+    event_type = models.CharField(max_length=100)
+    description = models.TextField()
+    actor = models.ForeignKey(User, related_name='timeline_events', on_delete=models.SET_NULL, null=True)
+    target_entity_type = models.CharField(max_length=50, null=True, blank=True)
+    target_entity_id = models.CharField(max_length=255, null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    occurred_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['-occurred_at']
+        indexes = [
+            models.Index(fields=['case']),
+            models.Index(fields=['organization']),
+            models.Index(fields=['event_type']),
+            models.Index(fields=['occurred_at']),
+        ]
+
+# MITRE ATT&CK models
+class MitreTactic(models.Model):
+    tactic_id = models.CharField(max_length=50, primary_key=True)
+    name = models.CharField(max_length=255)
+    description = models.TextField()
+    url = models.CharField(max_length=255)
+    version = models.CharField(max_length=20)
+
+    def __str__(self):
+        return f"{self.tactic_id} - {self.name}"
+
+class MitreTechnique(models.Model):
+    technique_id = models.CharField(max_length=50, primary_key=True)
+    name = models.CharField(max_length=255)
+    description = models.TextField()
+    url = models.CharField(max_length=255)
+    is_subtechnique = models.BooleanField(default=False)
+    parent_technique = models.ForeignKey('self', null=True, blank=True, 
+                                         related_name='subtechniques', 
+                                         on_delete=models.CASCADE)
+    version = models.CharField(max_length=20)
+    tactics = models.ManyToManyField(MitreTactic, related_name='techniques', 
+                                     through='TechniqueTactic')
+
+    def __str__(self):
+        return f"{self.technique_id} - {self.name}"
+
+class TechniqueTactic(models.Model):
+    technique = models.ForeignKey(MitreTechnique, on_delete=models.CASCADE)
+    tactic = models.ForeignKey(MitreTactic, on_delete=models.CASCADE)
+
+    class Meta:
+        unique_together = ('technique', 'tactic')
+
+class CaseMitreTechnique(models.Model):
+    case = models.ForeignKey('Case', related_name='mitre_techniques', on_delete=models.CASCADE)
+    technique = models.ForeignKey(MitreTechnique, related_name='cases', on_delete=models.CASCADE)
+    linked_by = models.ForeignKey(User, related_name='case_technique_links', on_delete=models.SET_NULL, null=True)
+    linked_at = models.DateTimeField(default=timezone.now)
+    context_notes = models.TextField(blank=True, null=True)
+
+    class Meta:
+        unique_together = ('case', 'technique')
+
+class AlertMitreTechnique(models.Model):
+    alert = models.ForeignKey('Alert', related_name='mitre_techniques', on_delete=models.CASCADE)
+    technique = models.ForeignKey(MitreTechnique, related_name='alerts', on_delete=models.CASCADE)
+    linked_by = models.ForeignKey(User, related_name='alert_technique_links', on_delete=models.SET_NULL, null=True)
+    linked_at = models.DateTimeField(default=timezone.now)
+    context_notes = models.TextField(blank=True, null=True)
+
+    class Meta:
+        unique_together = ('alert', 'technique')
+
+# Knowledge Base models
+class KBCategory(models.Model):
+    category_id = models.AutoField(primary_key=True)
+    name = models.CharField(max_length=100)
+    parent_category = models.ForeignKey('self', null=True, blank=True, 
+                                        related_name='subcategories', 
+                                        on_delete=models.CASCADE)
+    organization = models.ForeignKey('Organization', related_name='kb_categories',
+                                     null=True, blank=True, on_delete=models.CASCADE)
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        verbose_name_plural = "KB Categories"
+
+class KBArticle(models.Model):
+    STATUS_CHOICES = (
+        ('DRAFT', 'Draft'),
+        ('PUBLISHED', 'Published'),
+        ('ARCHIVED', 'Archived'),
+    )
+    
+    article_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=255)
+    slug = models.SlugField(max_length=255, unique=True)
+    content = models.TextField()
+    category = models.ForeignKey(KBCategory, related_name='articles', 
+                                null=True, blank=True, on_delete=models.SET_NULL)
+    organization = models.ForeignKey('Organization', related_name='kb_articles',
+                                    null=True, blank=True, on_delete=models.CASCADE)
+    author = models.ForeignKey(User, related_name='kb_articles', on_delete=models.SET_NULL, null=True)
+    version = models.IntegerField(default=1)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
+    tags = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return self.title
+
+    def save(self, *args, **kwargs):
+        # Generate slug if not provided
+        if not self.slug:
+            self.slug = slugify(self.title)
+            
+        # Set published_at if status changes to PUBLISHED
+        if self.status == 'PUBLISHED' and not self.published_at:
+            self.published_at = timezone.now()
+            
+        super().save(*args, **kwargs)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['slug']),
+            models.Index(fields=['status']),
+            models.Index(fields=['organization']),
+            models.Index(fields=['category']),
+        ]
+
+class KBArticleVersion(models.Model):
+    version_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    article = models.ForeignKey(KBArticle, related_name='versions', on_delete=models.CASCADE)
+    version_number = models.IntegerField()
+    title = models.CharField(max_length=255)
+    content = models.TextField()
+    author = models.ForeignKey(User, related_name='kb_article_versions', on_delete=models.SET_NULL, null=True)
+    changed_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        unique_together = ('article', 'version_number')
+        ordering = ['-version_number']

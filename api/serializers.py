@@ -4,7 +4,8 @@ from .models import (
     Organization, Team, Profile, Role, Permission, UserRole, RolePermission,
     AlertSeverity, AlertStatus, Alert, AlertComment, AlertCustomFieldDefinition, AlertCustomFieldValue,
     CaseSeverity, CaseStatus, CaseTemplate, Case, CaseComment, CaseCustomFieldDefinition, CaseCustomFieldValue,
-    TaskStatus, Task, ObservableType, TLPLevel, PAPLevel, Observable, CaseObservable, AlertObservable, AuditLog
+    TaskStatus, Task, ObservableType, TLPLevel, PAPLevel, Observable, CaseObservable, AlertObservable, AuditLog,
+    TimelineEvent, MitreTactic, MitreTechnique, CaseMitreTechnique, AlertMitreTechnique, KBCategory, KBArticleVersion, KBArticle
 )
 
 class OrganizationSerializer(serializers.ModelSerializer):
@@ -228,4 +229,105 @@ class AuditLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = AuditLog
         fields = '__all__'
-        read_only_fields = ['log_id', 'timestamp'] 
+        read_only_fields = ['log_id', 'timestamp']
+
+# Timeline serializers
+class TimelineEventSerializer(serializers.ModelSerializer):
+    actor_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = TimelineEvent
+        fields = '__all__'
+    
+    def get_actor_name(self, obj):
+        if obj.actor:
+            return f"{obj.actor.first_name} {obj.actor.last_name}".strip() or obj.actor.username
+        return None
+
+# MITRE ATT&CK serializers
+class MitreTacticSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MitreTactic
+        fields = '__all__'
+
+class MitreTechniqueSerializer(serializers.ModelSerializer):
+    tactics = MitreTacticSerializer(many=True, read_only=True)
+    parent_technique_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = MitreTechnique
+        fields = '__all__'
+    
+    def get_parent_technique_name(self, obj):
+        if obj.parent_technique:
+            return obj.parent_technique.name
+        return None
+
+class CaseMitreTechniqueSerializer(serializers.ModelSerializer):
+    technique = MitreTechniqueSerializer(read_only=True)
+    technique_id = serializers.CharField(write_only=True)
+    linked_by_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = CaseMitreTechnique
+        fields = ['technique', 'technique_id', 'linked_by', 'linked_by_name', 'linked_at', 'context_notes']
+    
+    def get_linked_by_name(self, obj):
+        if obj.linked_by:
+            return f"{obj.linked_by.first_name} {obj.linked_by.last_name}".strip() or obj.linked_by.username
+        return None
+
+class AlertMitreTechniqueSerializer(serializers.ModelSerializer):
+    technique = MitreTechniqueSerializer(read_only=True)
+    technique_id = serializers.CharField(write_only=True)
+    linked_by_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = AlertMitreTechnique
+        fields = ['technique', 'technique_id', 'linked_by', 'linked_by_name', 'linked_at', 'context_notes']
+    
+    def get_linked_by_name(self, obj):
+        if obj.linked_by:
+            return f"{obj.linked_by.first_name} {obj.linked_by.last_name}".strip() or obj.linked_by.username
+        return None
+
+# Knowledge Base serializers
+class KBCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = KBCategory
+        fields = '__all__'
+
+class KBArticleVersionSerializer(serializers.ModelSerializer):
+    author_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = KBArticleVersion
+        fields = ['version_id', 'article', 'version_number', 'title', 
+                 'content', 'author', 'author_name', 'changed_at']
+    
+    def get_author_name(self, obj):
+        if obj.author:
+            return f"{obj.author.first_name} {obj.author.last_name}".strip() or obj.author.username
+        return None
+
+class KBArticleSerializer(serializers.ModelSerializer):
+    author_name = serializers.SerializerMethodField()
+    category_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = KBArticle
+        fields = ['article_id', 'title', 'slug', 'content', 'category', 
+                 'category_name', 'organization', 'author', 'author_name',
+                 'version', 'status', 'tags', 'created_at', 'updated_at', 
+                 'published_at']
+        read_only_fields = ['article_id', 'created_at', 'updated_at', 'published_at']
+    
+    def get_author_name(self, obj):
+        if obj.author:
+            return f"{obj.author.first_name} {obj.author.last_name}".strip() or obj.author.username
+        return None
+    
+    def get_category_name(self, obj):
+        if obj.category:
+            return obj.category.name
+        return None 
