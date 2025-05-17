@@ -1,4 +1,5 @@
 # Plataforma de Resposta a Incidentes
+[![status](https://img.shields.io/badge/⚠️%20em%20desenvolvimento-Use%20por%20sua%20conta%20e%20risco-red)](#)
 
 ## Visão Geral
 
