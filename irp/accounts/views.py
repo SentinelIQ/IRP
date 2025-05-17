@@ -7,12 +7,17 @@ from rest_framework.authtoken.models import Token
 from rest_framework import status
 from django.contrib.auth import authenticate
 from rest_framework.decorators import api_view, permission_classes, action
+from django.utils import timezone
+import ldap
+import json
+import logging
+from cryptography.fernet import Fernet
 
-from .models import Organization, Team, Profile, Role, Permission, UserRole, RolePermission
+from .models import Organization, Team, Profile, Role, Permission, UserRole, RolePermission, LDAPConfig
 from .serializers import (
     OrganizationSerializer, TeamSerializer, ProfileSerializer, 
     RoleSerializer, PermissionSerializer, UserRoleSerializer,
-    RolePermissionSerializer, UserSerializer
+    RolePermissionSerializer, UserSerializer, LDAPConfigSerializer
 )
 from irp.common.permissions import HasRolePermission, has_permission
 from irp.common.audit import audit_action
@@ -453,3 +458,343 @@ def test_api_status(request):
         "message": "API is running",
         "version": "1.0.0"
     }, status=status.HTTP_200_OK)
+
+
+class LDAPConfigViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint for LDAP/AD configuration management.
+    """
+    queryset = LDAPConfig.objects.all()
+    serializer_class = LDAPConfigSerializer
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'ldap:manage'
+    
+    @audit_action(entity_type='LDAP_CONFIG', action_type='CREATE')
+    def perform_create(self, serializer):
+        return super().perform_create(serializer)
+        
+    @audit_action(entity_type='LDAP_CONFIG', action_type='UPDATE')
+    def perform_update(self, serializer):
+        return super().perform_update(serializer)
+        
+    @audit_action(entity_type='LDAP_CONFIG', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
+        
+    @audit_action(entity_type='LDAP_CONFIG', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
+    
+    @audit_action(entity_type='LDAP_CONFIG', action_type='TEST')
+    @action(detail=True, methods=['post'])
+    def test_connection(self, request, pk=None):
+        """
+        Test the LDAP/AD connection with the provided configuration.
+        """
+        ldap_config = self.get_object()
+        
+        try:
+            # Initialize LDAP connection
+            ldap_connection = self._get_ldap_connection(ldap_config)
+            
+            # Try to bind with the provided credentials
+            ldap_connection.simple_bind_s(ldap_config.bind_dn, ldap_config.bind_password)
+            
+            # Unbind when done
+            ldap_connection.unbind_s()
+            
+            return Response({
+                'status': 'success',
+                'message': 'Successfully connected to LDAP server and authenticated'
+            })
+        except ldap.INVALID_CREDENTIALS:
+            return Response({
+                'status': 'error',
+                'message': 'Invalid credentials. Check bind DN and password.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except ldap.SERVER_DOWN:
+            return Response({
+                'status': 'error',
+                'message': 'Failed to connect to LDAP server. Check server URL and network connection.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({
+                'status': 'error',
+                'message': f'LDAP connection error: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    @audit_action(entity_type='LDAP_CONFIG', action_type='SYNC')
+    @action(detail=True, methods=['post'])
+    def trigger_sync(self, request, pk=None):
+        """
+        Trigger a manual synchronization with the LDAP/AD server.
+        """
+        ldap_config = self.get_object()
+        
+        if not has_permission(request.user, 'ldap:sync'):
+            return Response({
+                'status': 'error',
+                'message': 'You do not have permission to trigger LDAP synchronization'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        try:
+            # Update status to PENDING
+            ldap_config.last_sync_status = 'PENDING'
+            ldap_config.save(update_fields=['last_sync_status'])
+            
+            # Trigger the synchronization task
+            from .tasks import sync_ldap_users
+            sync_ldap_users.delay(str(ldap_config.config_id))
+            
+            return Response({
+                'status': 'success',
+                'message': 'LDAP synchronization triggered successfully'
+            })
+        except Exception as e:
+            ldap_config.last_sync_status = 'FAILED'
+            ldap_config.last_sync_message = str(e)
+            ldap_config.last_sync_timestamp = timezone.now()
+            ldap_config.save(update_fields=[
+                'last_sync_status', 'last_sync_message', 'last_sync_timestamp'
+            ])
+            
+            return Response({
+                'status': 'error',
+                'message': f'Failed to trigger LDAP synchronization: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    def _get_ldap_connection(self, ldap_config):
+        """
+        Create and return an LDAP connection based on the configuration.
+        """
+        # Set global LDAP options
+        ldap.set_option(ldap.OPT_REFERRALS, 0)
+        ldap.set_option(ldap.OPT_NETWORK_TIMEOUT, 10)
+        
+        # Create connection
+        ldap_connection = ldap.initialize(ldap_config.server_url)
+        
+        # Configure TLS if enabled
+        if ldap_config.ldap_tls_enabled:
+            ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_NEVER)
+            if ldap_config.ldap_tls_ca_cert_path:
+                ldap.set_option(ldap.OPT_X_TLS_CACERTFILE, ldap_config.ldap_tls_ca_cert_path)
+            
+            if ldap_config.server_url.startswith('ldap://'):
+                ldap_connection.start_tls_s()
+        
+        return ldap_connection
+
+
+class LDAPAuthenticationBackend(object):
+    """
+    Custom authentication backend for LDAP/AD integration.
+    This allows users to authenticate using their LDAP/AD credentials.
+    """
+    
+    def authenticate(self, request, username=None, password=None):
+        if not username or not password:
+            return None
+        
+        # Find active LDAP configurations
+        ldap_configs = LDAPConfig.objects.filter(
+            is_active=True, 
+            enable_delegated_authentication=True
+        )
+        
+        if not ldap_configs.exists():
+            return None  # No active LDAP configuration with delegated auth
+        
+        # Try each LDAP configuration until one works
+        for ldap_config in ldap_configs:
+            try:
+                # Initialize LDAP connection
+                ldap_connection = self._get_ldap_connection(ldap_config)
+                
+                # Find user in LDAP
+                user_dn = self._find_user_dn(ldap_connection, ldap_config, username)
+                if not user_dn:
+                    continue  # User not found in this LDAP, try next one
+                
+                # Authenticate user against LDAP
+                try:
+                    ldap_connection.simple_bind_s(user_dn, password)
+                except ldap.INVALID_CREDENTIALS:
+                    continue  # Invalid credentials, try next LDAP config
+                
+                # Get user attributes from LDAP
+                user_attrs = self._get_user_attributes(ldap_connection, ldap_config, user_dn)
+                
+                # Find or create user in local database
+                user, created = self._get_or_create_local_user(ldap_config, username, user_attrs)
+                
+                # Unbind LDAP connection
+                ldap_connection.unbind_s()
+                
+                return user
+            except Exception as e:
+                logging.error(f"LDAP authentication error: {str(e)}")
+                continue
+        
+        return None
+    
+    def _get_ldap_connection(self, ldap_config):
+        """
+        Create and return an LDAP connection based on the configuration.
+        """
+        # Set global LDAP options
+        ldap.set_option(ldap.OPT_REFERRALS, 0)
+        ldap.set_option(ldap.OPT_NETWORK_TIMEOUT, 10)
+        
+        # Create connection
+        ldap_connection = ldap.initialize(ldap_config.server_url)
+        
+        # Configure TLS if enabled
+        if ldap_config.ldap_tls_enabled:
+            ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_NEVER)
+            if ldap_config.ldap_tls_ca_cert_path:
+                ldap.set_option(ldap.OPT_X_TLS_CACERTFILE, ldap_config.ldap_tls_ca_cert_path)
+            
+            if ldap_config.server_url.startswith('ldap://'):
+                ldap_connection.start_tls_s()
+        
+        return ldap_connection
+    
+    def _find_user_dn(self, ldap_connection, ldap_config, username):
+        """
+        Find the user's DN in the LDAP directory.
+        """
+        # Get username attribute from mapping
+        username_attr = ldap_config.user_attribute_mapping.get('username', 'sAMAccountName')
+        
+        # Build search filter
+        search_filter = f"(&{ldap_config.user_search_filter}({username_attr}={username}))"
+        
+        # Search for user
+        result = ldap_connection.search_s(
+            ldap_config.user_base_dn,
+            ldap.SCOPE_SUBTREE,
+            search_filter,
+            ['distinguishedName']
+        )
+        
+        if not result or len(result) == 0:
+            return None
+        
+        return result[0][0]  # Return the DN
+    
+    def _get_user_attributes(self, ldap_connection, ldap_config, user_dn):
+        """
+        Get user attributes from LDAP.
+        """
+        # Get attributes needed from mapping
+        attrs_to_retrieve = list(ldap_config.user_attribute_mapping.values())
+        
+        # Add any additional attributes we might need
+        if 'userAccountControl' not in attrs_to_retrieve:
+            attrs_to_retrieve.append('userAccountControl')
+        
+        # Search for user attributes
+        result = ldap_connection.search_s(
+            user_dn,
+            ldap.SCOPE_BASE,
+            '(objectClass=*)',
+            attrs_to_retrieve
+        )
+        
+        if not result or len(result) == 0:
+            return {}
+        
+        return result[0][1]  # Return the attributes
+    
+    def _get_or_create_local_user(self, ldap_config, username, user_attrs):
+        """
+        Find or create the user in the local database.
+        """
+        # Map attributes from LDAP to local fields
+        mapping = ldap_config.user_attribute_mapping
+        user_data = {}
+        
+        for local_field, ldap_attr in mapping.items():
+            if ldap_attr in user_attrs:
+                # LDAP returns values as lists of bytes
+                attr_value = user_attrs[ldap_attr][0]
+                if isinstance(attr_value, bytes):
+                    attr_value = attr_value.decode('utf-8')
+                user_data[local_field] = attr_value
+        
+        # Check if user exists using username from mapping
+        username_field = user_data.get('username', username)
+        try:
+            user = User.objects.get(username=username_field)
+            created = False
+            
+            # Update user fields if needed
+            update_fields = []
+            
+            if 'email' in user_data and user.email != user_data['email']:
+                user.email = user_data['email']
+                update_fields.append('email')
+            
+            if 'first_name' in user_data and user.first_name != user_data['first_name']:
+                user.first_name = user_data['first_name']
+                update_fields.append('first_name')
+            
+            if 'last_name' in user_data and user.last_name != user_data['last_name']:
+                user.last_name = user_data['last_name']
+                update_fields.append('last_name')
+            
+            if update_fields:
+                user.save(update_fields=update_fields)
+            
+            # Update profile as well
+            if hasattr(user, 'profile'):
+                profile_update_fields = []
+                
+                if 'full_name' in user_data and user.profile.full_name != user_data['full_name']:
+                    user.profile.full_name = user_data['full_name']
+                    profile_update_fields.append('full_name')
+                
+                # Set LDAP identifier
+                if not user.profile.external_id or not user.profile.managed_by_ldap:
+                    user.profile.external_id = user_attrs.get('distinguishedName', [b''])[0].decode('utf-8')
+                    user.profile.managed_by_ldap = True
+                    profile_update_fields.extend(['external_id', 'managed_by_ldap'])
+                
+                if profile_update_fields:
+                    user.profile.save(update_fields=profile_update_fields)
+        
+        except User.DoesNotExist:
+            # Create new user
+            user_kwargs = {
+                'username': username_field,
+                'email': user_data.get('email', ''),
+                'first_name': user_data.get('first_name', ''),
+                'last_name': user_data.get('last_name', ''),
+                'is_active': True,
+                'is_staff': False,
+                'is_superuser': False
+            }
+            
+            user = User.objects.create_user(**user_kwargs)
+            created = True
+            
+            # Create or update profile
+            profile = Profile.objects.get_or_create(user=user)[0]
+            profile.full_name = user_data.get('full_name', '')
+            profile.external_id = user_attrs.get('distinguishedName', [b''])[0].decode('utf-8')
+            profile.managed_by_ldap = True
+            profile.save()
+            
+            # If organization mapping is provided, assign user to organization
+            if ldap_config.organization:
+                profile.organization = ldap_config.organization
+                profile.save(update_fields=['organization'])
+        
+        return user, created
+    
+    def get_user(self, user_id):
+        try:
+            return User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            return None

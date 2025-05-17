@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
-from .models import Organization, Team, Profile, Role, Permission, UserRole, RolePermission
+from .models import Organization, Team, Profile, Role, Permission, UserRole, RolePermission, LDAPConfig
 from django.utils.text import slugify
 
 
@@ -206,3 +206,32 @@ class UserSerializer(serializers.ModelSerializer):
                 team.members.add(instance)
         
         return instance
+
+
+class LDAPConfigSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LDAPConfig
+        fields = [
+            'config_id', 'name', 'organization', 'server_url', 'bind_dn', 
+            'bind_password', 'user_base_dn', 'user_search_filter', 
+            'user_attribute_mapping', 'group_base_dn', 'group_search_filter', 
+            'group_attribute_mapping', 'group_to_organization_team_mapping', 
+            'sync_interval_minutes', 'is_active', 'last_sync_status', 
+            'last_sync_message', 'last_sync_timestamp', 'enable_user_provisioning', 
+            'enable_user_deprovisioning', 'ldap_tls_enabled', 'ldap_tls_ca_cert_path',
+            'enable_delegated_authentication'
+        ]
+        read_only_fields = ['config_id', 'last_sync_status', 'last_sync_message', 'last_sync_timestamp']
+        extra_kwargs = {
+            'bind_password': {'write_only': True}
+        }
+
+    def validate_user_attribute_mapping(self, value):
+        """
+        Validate that the user attribute mapping contains at least the required fields
+        """
+        required_fields = ['username']
+        for field in required_fields:
+            if field not in value:
+                raise serializers.ValidationError(f"Missing required mapping for '{field}'")
+        return value

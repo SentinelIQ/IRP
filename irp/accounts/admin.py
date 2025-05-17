@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Organization, Team, Profile, Role, Permission, UserRole, RolePermission
+from .models import Organization, Team, Profile, Role, Permission, UserRole, RolePermission, LDAPConfig
 from django.db.models.signals import post_migrate
 from django.dispatch import receiver
 
@@ -11,6 +11,41 @@ admin.site.register(Role)
 admin.site.register(Permission)
 admin.site.register(UserRole)
 admin.site.register(RolePermission)
+
+class LDAPConfigAdmin(admin.ModelAdmin):
+    list_display = ('name', 'organization', 'server_url', 'is_active', 'last_sync_status', 'last_sync_timestamp')
+    list_filter = ('is_active', 'last_sync_status', 'organization')
+    search_fields = ('name', 'server_url')
+    readonly_fields = ('last_sync_status', 'last_sync_message', 'last_sync_timestamp', 'created_at', 'updated_at')
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('name', 'organization', 'is_active')
+        }),
+        ('Connection Settings', {
+            'fields': ('server_url', 'bind_dn', 'bind_password', 'ldap_tls_enabled', 'ldap_tls_ca_cert_path')
+        }),
+        ('User Synchronization', {
+            'fields': ('user_base_dn', 'user_search_filter', 'user_attribute_mapping', 
+                     'enable_user_provisioning', 'enable_user_deprovisioning', 'enable_delegated_authentication')
+        }),
+        ('Group Synchronization', {
+            'fields': ('group_base_dn', 'group_search_filter', 'group_attribute_mapping', 
+                     'group_to_organization_team_mapping')
+        }),
+        ('Sync Schedule & Status', {
+            'fields': ('sync_interval_minutes', 'last_sync_status', 'last_sync_message', 'last_sync_timestamp')
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+    def save_model(self, request, obj, form, change):
+        # Securely handle password, encrypt if needed
+        super().save_model(request, obj, form, change)
+
+admin.site.register(LDAPConfig, LDAPConfigAdmin)
 
 @receiver(post_migrate)
 def create_default_permissions(sender, **kwargs):
@@ -114,3 +149,9 @@ def create_default_permissions(sender, **kwargs):
             Permission.objects.create(code='dashboards:view', name='Visualizar Dashboards')
         if not Permission.objects.filter(code='dashboards:manage').exists():
             Permission.objects.create(code='dashboards:manage', name='Gerenciar Dashboards')
+            
+        # Novas permissões para LDAP/AD
+        if not Permission.objects.filter(code='ldap:manage').exists():
+            Permission.objects.create(code='ldap:manage', name='Gerenciar Configurações LDAP/AD')
+        if not Permission.objects.filter(code='ldap:sync').exists():
+            Permission.objects.create(code='ldap:sync', name='Executar Sincronização LDAP/AD')

@@ -6,7 +6,7 @@ from .views import (
     OrganizationViewSet, TeamViewSet, ProfileViewSet, RoleViewSet, PermissionViewSet,
     UserRoleViewSet, RolePermissionViewSet, UserViewSet,
     HelloWorldView, LoginView, LogoutView, test_api_status,
-    ChangePasswordView, AdminResetPasswordView
+    ChangePasswordView, AdminResetPasswordView, LDAPConfigViewSet
 )
 
 router = DefaultRouter()
@@ -20,6 +20,7 @@ router.register(r'permissions', PermissionViewSet)
 router.register(r'user-roles', UserRoleViewSet)
 router.register(r'role-permissions', RolePermissionViewSet)
 router.register(r'users', UserViewSet)
+router.register(r'ldap-configs', LDAPConfigViewSet)
 
 # Configuração de routers aninhados (times por organização)
 organizations_router = routers.NestedSimpleRouter(router, r'organizations', lookup='organization')

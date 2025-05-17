@@ -178,6 +178,12 @@ REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
 
+# Authentication backends including LDAP
+AUTHENTICATION_BACKENDS = [
+    'django.contrib.auth.backends.ModelBackend',
+    'irp.accounts.views.LDAPAuthenticationBackend',
+]
+
 # Spectacular settings for API documentation
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Incident Response Platform API',

@@ -30,6 +30,7 @@ dependencies = [
     "django-extensions>=4.1",
     "stix2>=3.0.1",
     "channels[daphne]>=4.2.2",
+    "python-ldap>=3.4.3", # Para integração com LDAP/AD
 ]
 
 [project.optional-dependencies]
