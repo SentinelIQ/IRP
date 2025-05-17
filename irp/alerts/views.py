@@ -21,6 +21,8 @@ from .serializers import (
 )
 # AlertMitreTechniqueSerializer foi movido para irp.mitre.serializers
 from irp.common.permissions import HasRolePermission
+from irp.observables.services import ObservableService
+from irp.common.websocket import WebSocketService
 
 # This will be properly implemented in the audit module
 from irp.common.audit import audit_action
@@ -70,6 +72,8 @@ class AlertViewSet(viewsets.ModelViewSet):
             self.required_permission = 'alert:delete'
         elif self.action == 'escalate_to_case':
             self.required_permission = 'alert:escalate'
+        elif self.action == 'similar':
+            self.required_permission = 'alert:view'
         return super().get_permissions()
     
     def get_queryset(self):
@@ -147,6 +151,13 @@ class AlertViewSet(viewsets.ModelViewSet):
                 # Log error but continue alert creation
                 pass
                 
+        # Notificar via WebSocket
+        WebSocketService.send_alert_update(
+            alert_id=alert.alert_id,
+            event_type='created',
+            data={'alert': AlertSerializer(alert).data}
+        )
+        
         return alert
     
     @audit_action(entity_type='ALERT', action_type='UPDATE')
@@ -172,6 +183,13 @@ class AlertViewSet(viewsets.ModelViewSet):
             #     details_before={'status': str(previous_status)},
             #     details_after={'status': str(alert.status)}
             # )
+        
+        # Notificar via WebSocket
+        WebSocketService.send_alert_update(
+            alert_id=alert.alert_id,
+            event_type='updated',
+            data={'alert': AlertSerializer(alert).data}
+        )
     
     @audit_action(entity_type='ALERT', action_type='DELETE')
     def destroy(self, request, *args, **kwargs):
@@ -179,16 +197,125 @@ class AlertViewSet(viewsets.ModelViewSet):
         # Soft delete
         alert.is_deleted = True
         alert.save()
+        
+        # Notificar via WebSocket
+        WebSocketService.send_alert_update(
+            alert_id=alert.alert_id,
+            event_type='deleted',
+            data={'alert_id': str(alert.alert_id)}
+        )
+        
         return Response(status=status.HTTP_204_NO_CONTENT)
     
     @action(detail=True, methods=['post'])
     @audit_action(entity_type='ALERT', action_type='ESCALATE')
     def escalate_to_case(self, request, pk=None):
-        # This will be implemented later when the cases module is migrated
-        return Response({"detail": "Feature not yet implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED)
+        alert = self.get_object()
+        
+        # Get template if provided
+        template_id = request.data.get('template_id')
+        template = None
+        if template_id:
+            from irp.cases.models import CaseTemplate
+            try:
+                template = CaseTemplate.objects.get(pk=template_id)
+            except CaseTemplate.DoesNotExist:
+                return Response(
+                    {"detail": f"Template with ID {template_id} not found"}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+                
+        # Get optional title and description
+        case_title = request.data.get('title')
+        case_description = request.data.get('description')
+        
+        # Use the service to create the case
+        from .services import AlertService
+        try:
+            case = AlertService.escalate_to_case(
+                alert=alert,
+                user=request.user,
+                template=template,
+                case_title=case_title,
+                case_description=case_description
+            )
+            
+            # Notificar via WebSocket (tanto o alerta quanto o caso)
+            WebSocketService.send_alert_update(
+                alert_id=alert.alert_id,
+                event_type='escalated',
+                data={
+                    'alert_id': str(alert.alert_id),
+                    'case_id': str(case.case_id)
+                }
+            )
+            
+            WebSocketService.send_case_update(
+                case_id=case.case_id,
+                event_type='created_from_alert',
+                data={
+                    'case_id': str(case.case_id),
+                    'alert_id': str(alert.alert_id)
+                }
+            )
+            
+            # Return the created case ID
+            return Response({
+                "detail": f"Alert escalated to case {case.case_id}",
+                "case_id": case.case_id
+            })
+            
+        except Exception as e:
+            return Response(
+                {"detail": f"Error escalating alert to case: {str(e)}"}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
-    # Adicionar o atributo __name__ para corrigir o problema
+    # Add the __name__ attribute to fix the problem
     escalate_to_case.__name__ = 'escalate_to_case'
+    
+    @action(detail=True, methods=['get'])
+    def similar(self, request, pk=None):
+        """
+        Find alerts similar to the specified alert.
+        """
+        alert = self.get_object()
+        
+        # Get the max results parameter (default to 10 if not provided)
+        max_results = int(request.query_params.get('max_results', 10))
+        
+        # Use the service to find similar alerts
+        from .services import AlertService
+        try:
+            similar_alerts = AlertService.find_similar_alerts(
+                alert=alert,
+                max_results=max_results
+            )
+            
+            # Serialize the results
+            from .serializers import SimplifiedAlertSerializer
+            results = []
+            for item in similar_alerts:
+                alert_data = SimplifiedAlertSerializer(item['alert']).data
+                results.append({
+                    'alert': alert_data,
+                    'score': item['score'],
+                    'match_reason': item['match_reason']
+                })
+                
+            return Response({
+                'count': len(results),
+                'results': results
+            })
+            
+        except Exception as e:
+            return Response(
+                {"detail": f"Error finding similar alerts: {str(e)}"}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    # Add the __name__ attribute to fix the problem
+    similar.__name__ = 'similar'
 
 
 class AlertCommentViewSet(viewsets.ModelViewSet):
@@ -215,15 +342,75 @@ class AlertCommentViewSet(viewsets.ModelViewSet):
         if not hasattr(user, 'profile') or user.profile.organization != alert.organization:
             raise permissions.PermissionDenied("Usuário não tem permissão para comentar neste alerta")
         
-        serializer.save(alert=alert, user=self.request.user)
+        # Save the comment
+        comment = serializer.save(alert=alert, user=self.request.user)
+        
+        # Extract observables from comment text
+        if comment.comment_text and hasattr(user, 'profile'):
+            auto_extract = self.request.data.get('auto_extract_observables', True)
+            if auto_extract:
+                # Extract and create observables
+                observables = ObservableService.extract_and_create_observables_from_text(
+                    comment.comment_text,
+                    user,
+                    user.profile.organization
+                )
+                
+                # Link observables to the alert
+                for observable in observables:
+                    AlertObservable.objects.get_or_create(
+                        alert=alert,
+                        observable=observable.observable_id,
+                        defaults={'sighted_at': timezone.now()}
+                    )
+        
+        # Notificar via WebSocket
+        WebSocketService.send_alert_update(
+            alert_id=alert.alert_id,
+            event_type='comment_added',
+            data={
+                'alert_id': str(alert.alert_id),
+                'comment': AlertCommentSerializer(comment).data,
+                'extracted_observables': len(observables)
+            }
+        )
+        
+        return comment
     
     @audit_action(entity_type='ALERT_COMMENT', action_type='UPDATE')
     def perform_update(self, serializer):
-        serializer.save()
+        comment = serializer.save()
+        
+        # Notificar via WebSocket
+        WebSocketService.send_alert_update(
+            alert_id=comment.alert.alert_id,
+            event_type='comment_updated',
+            data={
+                'alert_id': str(comment.alert.alert_id),
+                'comment': AlertCommentSerializer(comment).data
+            }
+        )
     
     @audit_action(entity_type='ALERT_COMMENT', action_type='DELETE')
     def destroy(self, request, *args, **kwargs):
-        return super().destroy(request, *args, **kwargs)
+        comment = self.get_object()
+        alert_id = comment.alert.alert_id
+        comment_id = str(comment.comment_id)
+        
+        # Delete the comment
+        response = super().destroy(request, *args, **kwargs)
+        
+        # Notificar via WebSocket
+        WebSocketService.send_alert_update(
+            alert_id=alert_id,
+            event_type='comment_deleted',
+            data={
+                'alert_id': str(alert_id),
+                'comment_id': comment_id
+            }
+        )
+        
+        return response
 
 
 class AlertCustomFieldDefinitionViewSet(viewsets.ModelViewSet):
@@ -285,6 +472,17 @@ class AlertCustomFieldValueViewSet(viewsets.ModelViewSet):
             raise permissions.PermissionDenied("Usuário não tem permissão para editar este alerta")
             
         serializer.save(alert=alert, field_definition=field_def)
+        
+        # Notificar via WebSocket
+        WebSocketService.send_alert_update(
+            alert_id=alert.alert_id,
+            event_type='custom_field_updated',
+            data={
+                'alert_id': str(alert.alert_id),
+                'field_name': field_def.name,
+                'field_id': str(field_def.id)
+            }
+        )
     
     @audit_action(entity_type='ALERT_CUSTOM_FIELD_VALUE', action_type='UPDATE')
     def perform_update(self, serializer):
@@ -299,16 +497,7 @@ class AlertObservableViewSet(viewsets.ModelViewSet):
     queryset = AlertObservable.objects.all()
     serializer_class = AlertObservableSerializer
     permission_classes = [permissions.IsAuthenticated, HasRolePermission]
-    required_permission = 'observable:view'
-    
-    def get_permissions(self):
-        if self.action == 'create':
-            self.required_permission = 'observable:create'
-        elif self.action in ['update', 'partial_update']:
-            self.required_permission = 'observable:edit'
-        elif self.action == 'destroy':
-            self.required_permission = 'observable:delete'
-        return super().get_permissions()
+    required_permission = 'alert:edit'
     
     def get_queryset(self):
         user = self.request.user
@@ -318,37 +507,43 @@ class AlertObservableViewSet(viewsets.ModelViewSet):
             )
         return AlertObservable.objects.none()
     
-    @audit_action(entity_type='ALERT_OBSERVABLE', action_type='CREATE')
     def perform_create(self, serializer):
-        # Esta implementação é temporária e será atualizada quando o módulo observable for migrado
-        # Por enquanto, assumimos que o observable_id é passado diretamente
         alert_id = self.request.data.get('alert')
-        observable_id = self.request.data.get('observable')  # UUID como string
-        
-        if not alert_id or not observable_id:
-            raise serializers.ValidationError("Tanto alert quanto observable são necessários")
-        
         alert = get_object_or_404(Alert, pk=alert_id)
         
         # Check if user belongs to the same organization as the alert
         user = self.request.user
         if not hasattr(user, 'profile') or user.profile.organization != alert.organization:
-            raise permissions.PermissionDenied("Usuário não tem permissão para adicionar observáveis a este alerta")
+            raise permissions.PermissionDenied("Usuário não tem permissão para editar este alerta")
         
-        # Converter observable_id para UUID
-        try:
-            observable_uuid = uuid.UUID(observable_id)
-            serializer.save(alert=alert, observable=observable_uuid)
-        except (ValueError, TypeError):
-            raise serializers.ValidationError("ID de observable inválido")
+        alert_observable = serializer.save(alert=alert)
+        
+        # Notificar via WebSocket
+        WebSocketService.send_alert_update(
+            alert_id=alert.alert_id,
+            event_type='observable_added',
+            data={
+                'alert_id': str(alert.alert_id),
+                'observable_id': str(alert_observable.observable)
+            }
+        )
     
-    @audit_action(entity_type='ALERT_OBSERVABLE', action_type='UPDATE')
-    def perform_update(self, serializer):
-        serializer.save()
-    
-    @audit_action(entity_type='ALERT_OBSERVABLE', action_type='DELETE')
-    def destroy(self, request, *args, **kwargs):
-        return super().destroy(request, *args, **kwargs)
+    def perform_destroy(self, instance):
+        alert_id = instance.alert.alert_id
+        observable_id = instance.observable
+        
+        # Delete the alert observable
+        instance.delete()
+        
+        # Notificar via WebSocket
+        WebSocketService.send_alert_update(
+            alert_id=alert_id,
+            event_type='observable_removed',
+            data={
+                'alert_id': str(alert_id),
+                'observable_id': str(observable_id)
+            }
+        )
 
 
 # AlertMitreTechniqueViewSet foi movido para irp.mitre.views

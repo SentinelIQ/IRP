@@ -29,6 +29,7 @@ dependencies = [
     "django-filter>=25.1",
     "django-extensions>=4.1",
     "stix2>=3.0.1",
+    "channels[daphne]>=4.2.2",
 ]
 
 [project.optional-dependencies]

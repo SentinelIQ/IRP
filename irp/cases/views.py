@@ -21,6 +21,8 @@ from irp.common.permissions import HasRolePermission
 from irp.common.audit import audit_action
 from irp.timeline.services import create_timeline_event
 from irp.audit.models import AuditLog
+from irp.observables.services import ObservableService
+from irp.common.websocket import WebSocketService
 
 class CaseSeverityViewSet(viewsets.ModelViewSet):
     queryset = CaseSeverity.objects.all()
@@ -234,6 +236,15 @@ class CaseViewSet(viewsets.ModelViewSet):
                     target_entity_id=str(task.task_id)
                 )
         
+        # Notificar via WebSocket
+        WebSocketService.send_case_update(
+            case_id=case.case_id,
+            event_type='created',
+            data={
+                'case': CaseSerializer(case).data
+            }
+        )
+        
         return case
 
     @audit_action(entity_type='CASE', action_type='UPDATE')
@@ -307,10 +318,35 @@ class CaseViewSet(viewsets.ModelViewSet):
                     'new_assignee': str(case.assignee) if case.assignee else None
                 }
             )
+        
+        # Notificar via WebSocket
+        WebSocketService.send_case_update(
+            case_id=case.case_id,
+            event_type='updated',
+            data={
+                'case': CaseSerializer(case).data,
+                'status_changed': previous_status != case.status,
+                'assignee_changed': previous_assignee != case.assignee
+            }
+        )
     
     @audit_action(entity_type='CASE', action_type='DELETE')
     def destroy(self, request, *args, **kwargs):
-        return super().destroy(request, *args, **kwargs)
+        case = self.get_object()
+        case_id = str(case.case_id)
+        
+        response = super().destroy(request, *args, **kwargs)
+        
+        # Notificar via WebSocket
+        WebSocketService.send_case_update(
+            case_id=case_id,
+            event_type='deleted',
+            data={
+                'case_id': case_id
+            }
+        )
+        
+        return response
 
     @action(detail=True, methods=['get'])
     def related(self, request, pk=None):
@@ -436,6 +472,16 @@ class TaskViewSet(viewsets.ModelViewSet):
                 }
             )
             
+            # Notificar via WebSocket
+            WebSocketService.send_case_update(
+                case_id=case.case_id,
+                event_type='task_created',
+                data={
+                    'case_id': str(case.case_id),
+                    'task': TaskSerializer(task).data
+                }
+            )
+            
             return task
         else:
             raise PermissionError("Usuário não pode criar tarefas neste caso")
@@ -516,28 +562,52 @@ class TaskViewSet(viewsets.ModelViewSet):
                 target_entity_id=str(task.task_id),
                 metadata={
                     'task_title': task.title,
-                    'old_assignee': str(previous_assignee.id) if previous_assignee else None,
-                    'new_assignee': str(task.assignee.id) if task.assignee else None
+                    'old_assignee': str(previous_assignee) if previous_assignee else None,
+                    'new_assignee': str(task.assignee) if task.assignee else None
                 }
             )
+        
+        # Notificar via WebSocket
+        WebSocketService.send_case_update(
+            case_id=task.case.case_id,
+            event_type='task_updated',
+            data={
+                'case_id': str(task.case.case_id),
+                'task': TaskSerializer(task).data,
+                'status_changed': previous_status != task.status,
+                'assignee_changed': previous_assignee != task.assignee
+            }
+        )
     
     @audit_action(entity_type='TASK', action_type='DELETE')
     def destroy(self, request, *args, **kwargs):
         task = self.get_object()
-        user = request.user
+        case = task.case
+        case_id = str(case.case_id)
+        task_id = str(task.task_id)
+        task_title = task.title
         
         # Adicionar evento na timeline antes de excluir
-        create_timeline_event(
-            case=task.case,
-            organization=task.case.organization,
-            event_type='TASK_DELETED',
-            description=f"Tarefa '{task.title}' removida por {user.get_full_name() or user.username}",
-            actor=user,
-            target_entity_type='Task',
-            target_entity_id=str(task.task_id),
-            metadata={
-                'task_title': task.title,
-                'task_status': str(task.status)
+        user = request.user
+        if hasattr(user, 'profile'):
+            create_timeline_event(
+                case=case,
+                organization=user.profile.organization,
+                event_type='TASK_DELETED',
+                description=f"Tarefa '{task_title}' removida por {user.get_full_name() or user.username}",
+                actor=user,
+                metadata={
+                    'task_title': task_title
+                }
+            )
+        
+        # Notificar via WebSocket
+        WebSocketService.send_case_update(
+            case_id=case_id,
+            event_type='task_deleted',
+            data={
+                'case_id': case_id,
+                'task_id': task_id
             }
         )
         
@@ -550,92 +620,151 @@ class CaseCommentViewSet(viewsets.ModelViewSet):
     required_permission = 'case:comment'
     
     def get_queryset(self):
-        case_id = self.kwargs.get('case_pk')
         user = self.request.user
-        
-        if case_id:
-            if hasattr(user, 'profile') and user.profile.organization:
-                org_id = user.profile.organization.organization_id
-                return CaseComment.objects.filter(case__case_id=case_id, case__organization_id=org_id)
+        if hasattr(user, 'profile') and user.profile.organization:
+            return CaseComment.objects.filter(
+                case__organization=user.profile.organization
+            )
         return CaseComment.objects.none()
     
     @audit_action(entity_type='CASE_COMMENT', action_type='CREATE')
     def perform_create(self, serializer):
-        case_id = self.kwargs.get('case_pk')
-        case = get_object_or_404(Case, case_id=case_id)
+        case_id = self.request.data.get('case')
+        case = get_object_or_404(Case, pk=case_id)
+        
+        # Check if user belongs to the same organization as the case
         user = self.request.user
+        if not hasattr(user, 'profile') or user.profile.organization != case.organization:
+            raise permissions.PermissionDenied("Usuário não tem permissão para comentar neste caso")
         
-        # Verificar se o usuário pertence à mesma organização do caso
-        if hasattr(user, 'profile') and user.profile.organization and user.profile.organization == case.organization:
-            comment = serializer.save(case=case, user=user)
-            
-            # Adicionar evento na timeline
-            create_timeline_event(
-                case=case,
-                organization=case.organization,
-                event_type='COMMENT_ADDED',
-                description=f"Comentário adicionado por {user.get_full_name() or user.username}",
-                actor=user,
-                target_entity_type='Comment',
-                target_entity_id=str(comment.id),
-                metadata={
-                    'comment_text': comment.text[:100] + ('...' if len(comment.text) > 100 else '')
-                }
-            )
-            
-            return comment
-        else:
-            raise PermissionError("Usuário não pode comentar neste caso")
-
-    @audit_action(entity_type='CASE_COMMENT', action_type='UPDATE')
-    def perform_update(self, serializer):
-        comment = self.get_object()
-        user = self.request.user
-        case = comment.case
+        # Save the comment
+        comment = serializer.save(case=case, user=self.request.user)
         
-        # Verificar se é o autor do comentário ou tem permissão especial
-        if comment.user != user and not user.has_perm('case:edit_any_comment'):
-            raise PermissionError("Usuário não pode editar este comentário")
-        
-        updated_comment = serializer.save()
-        
-        # Adicionar evento na timeline
+        # Create timeline event
         create_timeline_event(
             case=case,
-            organization=case.organization,
-            event_type='COMMENT_UPDATED',
-            description=f"Comentário editado por {user.get_full_name() or user.username}",
+            organization=user.profile.organization,
+            event_type='COMMENT_ADDED',
+            description=f"Comentário adicionado por {user.get_full_name() or user.username}",
             actor=user,
-            target_entity_type='Comment',
-            target_entity_id=str(comment.id),
+            target_entity_type='CaseComment',
+            target_entity_id=str(comment.comment_id),
             metadata={
-                'comment_text': updated_comment.text[:100] + ('...' if len(updated_comment.text) > 100 else '')
+                'comment_text': comment.comment_text[:100] + ('...' if len(comment.comment_text) > 100 else '')
             }
         )
         
-        return updated_comment
+        # Extract observables from comment text
+        if comment.comment_text and hasattr(user, 'profile'):
+            auto_extract = self.request.data.get('auto_extract_observables', True)
+            if auto_extract:
+                # Extract and create observables
+                observables = ObservableService.extract_and_create_observables_from_text(
+                    comment.comment_text,
+                    user,
+                    user.profile.organization
+                )
+                
+                # Link observables to the case
+                for observable in observables:
+                    CaseObservable.objects.get_or_create(
+                        case=case,
+                        observable=observable,
+                        defaults={'sighted_at': timezone.now()}
+                    )
+                    
+                    # Create timeline event for each observable
+                    create_timeline_event(
+                        case=case,
+                        organization=user.profile.organization,
+                        event_type='OBSERVABLE_EXTRACTED',
+                        description=f"Observável extraído automaticamente do comentário: {observable.value}",
+                        actor=user,
+                        target_entity_type='Observable',
+                        target_entity_id=str(observable.observable_id),
+                        metadata={
+                            'observable_value': observable.value,
+                            'observable_type': observable.type.name,
+                            'source': 'comment'
+                        }
+                    )
+        
+        # Notificar via WebSocket
+        WebSocketService.send_case_update(
+            case_id=case.case_id,
+            event_type='comment_added',
+            data={
+                'case_id': str(case.case_id),
+                'comment': CaseCommentSerializer(comment).data
+            }
+        )
+        
+        return comment
+    
+    @audit_action(entity_type='CASE_COMMENT', action_type='UPDATE')
+    def perform_update(self, serializer):
+        comment = serializer.instance
+        case = comment.case
+        
+        # Audit old value
+        old_text = comment.comment_text
+        
+        # Update the comment
+        serializer.save()
+        
+        # Create timeline event
+        create_timeline_event(
+            case=case,
+            organization=self.request.user.profile.organization if hasattr(self.request.user, 'profile') else None,
+            event_type='COMMENT_UPDATED',
+            description=f"Comentário editado por {self.request.user.get_full_name() or self.request.user.username}",
+            actor=self.request.user,
+            target_entity_type='CaseComment',
+            target_entity_id=str(comment.comment_id),
+            metadata={
+                'old_text': old_text[:100] + ('...' if len(old_text) > 100 else ''),
+                'new_text': comment.comment_text[:100] + ('...' if len(comment.comment_text) > 100 else '')
+            }
+        )
+        
+        # Notificar via WebSocket
+        WebSocketService.send_case_update(
+            case_id=case.case_id,
+            event_type='comment_updated',
+            data={
+                'case_id': str(case.case_id),
+                'comment': CaseCommentSerializer(comment).data
+            }
+        )
     
     @audit_action(entity_type='CASE_COMMENT', action_type='DELETE')
     def destroy(self, request, *args, **kwargs):
         comment = self.get_object()
-        user = request.user
         case = comment.case
+        case_id = str(case.case_id)
+        comment_id = str(comment.comment_id)
         
-        # Verificar se é o autor do comentário ou tem permissão especial
-        if comment.user != user and not user.has_perm('case:delete_any_comment'):
-            raise PermissionError("Usuário não pode excluir este comentário")
+        # Create timeline event before deleting
+        if hasattr(request.user, 'profile'):
+            create_timeline_event(
+                case=case,
+                organization=request.user.profile.organization,
+                event_type='COMMENT_DELETED',
+                description=f"Comentário removido por {request.user.get_full_name() or request.user.username}",
+                actor=request.user,
+                metadata={
+                    'comment_text': comment.comment_text[:100] + ('...' if len(comment.comment_text) > 100 else ''),
+                    'created_by': comment.user.get_full_name() or comment.user.username
+                }
+            )
         
-        # Adicionar evento na timeline
-        create_timeline_event(
-            case=case,
-            organization=case.organization,
-            event_type='COMMENT_DELETED',
-            description=f"Comentário excluído por {user.get_full_name() or user.username}",
-            actor=user,
-            target_entity_type='Comment',
-            target_entity_id=str(comment.id),
-            metadata={
-                'comment_text': comment.text[:100] + ('...' if len(comment.text) > 100 else '')
+        # Notificar via WebSocket
+        WebSocketService.send_case_update(
+            case_id=case_id,
+            event_type='comment_deleted',
+            data={
+                'case_id': case_id,
+                'comment_id': comment_id
             }
         )
         

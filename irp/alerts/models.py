@@ -16,6 +16,7 @@ class AlertSeverity(models.Model):
     
     class Meta:
         verbose_name_plural = 'Alert Severities'
+        ordering = ['level_order']
 
 
 class AlertStatus(models.Model):
@@ -32,6 +33,10 @@ class AlertStatus(models.Model):
     class Meta:
         unique_together = ('name', 'organization')
         verbose_name_plural = 'Alert Statuses'
+        indexes = [
+            models.Index(fields=['organization', 'is_default_open_status']),
+            models.Index(fields=['organization', 'is_terminal_status']),
+        ]
 
 
 class Alert(models.Model):
@@ -55,6 +60,23 @@ class Alert(models.Model):
     
     def __str__(self):
         return f"{self.title} - {self.source_system}"
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            # Core filters used frequently
+            models.Index(fields=['organization', 'is_deleted']),
+            models.Index(fields=['organization', 'status']),
+            models.Index(fields=['organization', 'severity']),
+            models.Index(fields=['organization', 'assignee']),
+            # Date range filters
+            models.Index(fields=['organization', 'created_at']),
+            models.Index(fields=['organization', 'first_seen_at']),
+            # Combination for alert lists
+            models.Index(fields=['organization', 'is_deleted', 'created_at']),
+            # For identifying alerts by external system
+            models.Index(fields=['source_system', 'external_alert_id']),
+        ]
 
 
 class AlertComment(models.Model):
@@ -66,6 +88,13 @@ class AlertComment(models.Model):
     
     def __str__(self):
         return f"Comment on {self.alert.title} by {self.user.username}"
+    
+    class Meta:
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['alert', 'created_at']),
+            models.Index(fields=['user', 'created_at']),
+        ]
 
 
 class AlertCustomFieldDefinition(models.Model):
@@ -91,6 +120,10 @@ class AlertCustomFieldDefinition(models.Model):
     
     class Meta:
         unique_together = ('organization', 'technical_name')
+        indexes = [
+            models.Index(fields=['organization', 'field_type']),
+            models.Index(fields=['organization', 'is_filterable']),
+        ]
 
 
 class AlertCustomFieldValue(models.Model):
@@ -103,6 +136,17 @@ class AlertCustomFieldValue(models.Model):
     
     class Meta:
         unique_together = ('alert', 'field_definition')
+        indexes = [
+            models.Index(fields=['alert', 'field_definition']),
+            # For filtering on text values
+            models.Index(fields=['field_definition', 'value_text']),
+            # For filtering on numeric values
+            models.Index(fields=['field_definition', 'value_number']),
+            # For filtering on boolean values
+            models.Index(fields=['field_definition', 'value_boolean']),
+            # For filtering on date values
+            models.Index(fields=['field_definition', 'value_date']),
+        ]
 
 
 class AlertObservable(models.Model):
@@ -113,5 +157,9 @@ class AlertObservable(models.Model):
     
     class Meta:
         unique_together = ('alert', 'observable')
+        indexes = [
+            models.Index(fields=['alert', 'sighted_at']),
+            models.Index(fields=['observable']),
+        ]
 
 # AlertMitreTechnique model foi movido para o módulo irp.mitre.models

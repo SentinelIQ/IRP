@@ -16,4 +16,6 @@ router.register(r'observables', ObservableViewSet)
 
 urlpatterns = [
     path('', include(router.urls)),
+    # A rota extract-observables é automaticamente adicionada pelo @action decorator
+    # como api/v1/observables/extract_from_text/
 ]

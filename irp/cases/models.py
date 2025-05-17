@@ -18,6 +18,7 @@ class CaseSeverity(models.Model):
     
     class Meta:
         verbose_name_plural = 'Case Severities'
+        ordering = ['level_order']
 
 class CaseStatus(models.Model):
     name = models.CharField(max_length=100)
@@ -33,6 +34,10 @@ class CaseStatus(models.Model):
     class Meta:
         unique_together = ('name', 'organization')
         verbose_name_plural = 'Case Statuses'
+        indexes = [
+            models.Index(fields=['organization', 'is_default_open_status']),
+            models.Index(fields=['organization', 'is_terminal_status']),
+        ]
 
 class CaseTemplate(models.Model):
     organization = models.ForeignKey(Organization, on_delete=models.CASCADE, null=True, blank=True, related_name='case_templates')
@@ -46,6 +51,11 @@ class CaseTemplate(models.Model):
     
     def __str__(self):
         return self.name
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['organization']),
+        ]
 
 class TaskStatus(models.Model):
     name = models.CharField(max_length=50, unique=True)
@@ -53,6 +63,9 @@ class TaskStatus(models.Model):
     
     def __str__(self):
         return self.name
+    
+    class Meta:
+        ordering = ['name']
 
 class Case(models.Model):
     case_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -72,6 +85,23 @@ class Case(models.Model):
     
     def __str__(self):
         return self.title
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            # Core filters used frequently
+            models.Index(fields=['organization']),
+            models.Index(fields=['organization', 'status']),
+            models.Index(fields=['organization', 'severity']),
+            models.Index(fields=['organization', 'assignee']),
+            models.Index(fields=['reporter']),
+            # Date range filters
+            models.Index(fields=['organization', 'created_at']),
+            models.Index(fields=['organization', 'updated_at']),
+            models.Index(fields=['organization', 'closed_at']),
+            # For status transitions
+            models.Index(fields=['status', 'updated_at']),
+        ]
     
     def save(self, *args, **kwargs):
         # Check if this is an existing case (not new)
@@ -116,6 +146,13 @@ class CaseComment(models.Model):
     
     def __str__(self):
         return f"Comment on {self.case.title} by {self.user.username}"
+    
+    class Meta:
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['case', 'created_at']),
+            models.Index(fields=['user', 'created_at']),
+        ]
 
 class CaseCustomFieldDefinition(models.Model):
     TYPE_CHOICES = [
@@ -140,6 +177,10 @@ class CaseCustomFieldDefinition(models.Model):
     
     class Meta:
         unique_together = ('organization', 'technical_name')
+        indexes = [
+            models.Index(fields=['organization', 'field_type']),
+            models.Index(fields=['organization', 'is_filterable']),
+        ]
 
 class CaseCustomFieldValue(models.Model):
     case = models.ForeignKey(Case, on_delete=models.CASCADE, related_name='custom_field_values')
@@ -151,6 +192,17 @@ class CaseCustomFieldValue(models.Model):
     
     class Meta:
         unique_together = ('case', 'field_definition')
+        indexes = [
+            models.Index(fields=['case', 'field_definition']),
+            # For filtering on text values
+            models.Index(fields=['field_definition', 'value_text']),
+            # For filtering on numeric values
+            models.Index(fields=['field_definition', 'value_number']),
+            # For filtering on boolean values
+            models.Index(fields=['field_definition', 'value_boolean']),
+            # For filtering on date values
+            models.Index(fields=['field_definition', 'value_date']),
+        ]
 
 class Task(models.Model):
     task_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -166,6 +218,16 @@ class Task(models.Model):
     
     def __str__(self):
         return f"{self.title} ({self.case.title})"
+    
+    class Meta:
+        ordering = ['case', 'order', 'created_at']
+        indexes = [
+            models.Index(fields=['case', 'status']),
+            models.Index(fields=['case', 'assignee']),
+            models.Index(fields=['case', 'due_date']),
+            models.Index(fields=['assignee', 'due_date']),
+            models.Index(fields=['status', 'due_date']),
+        ]
     
     def save(self, *args, **kwargs):
         # Check if this is an existing task (not new)
@@ -204,6 +266,10 @@ class CaseObservable(models.Model):
     
     class Meta:
         unique_together = ('case', 'observable')
+        indexes = [
+            models.Index(fields=['case', 'sighted_at']),
+            models.Index(fields=['observable', 'sighted_at']),
+        ]
 
 class CaseMitreTechnique(models.Model):
     case = models.ForeignKey(Case, related_name='case_module_techniques', on_delete=models.CASCADE)
@@ -213,4 +279,10 @@ class CaseMitreTechnique(models.Model):
     context_notes = models.TextField(blank=True, null=True)
     
     class Meta:
-        unique_together = ('case', 'technique') 
+        unique_together = ('case', 'technique')
+        indexes = [
+            models.Index(fields=['case']),
+            models.Index(fields=['technique']),
+            models.Index(fields=['linked_by']),
+            models.Index(fields=['linked_at']),
+        ] 
