@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework.authtoken',
     'drf_spectacular',  # API documentation
+    'django_extensions',  # Adicionado para listar URLs
     # 'api',  # Temporariamente comentado para as migrações
     'django_celery_beat',
     'django_celery_results',

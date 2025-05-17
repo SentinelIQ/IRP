@@ -11,8 +11,8 @@ from .views import (
 router = DefaultRouter()
 
 # Alert Management
-router.register(r'alert-severities', AlertSeverityViewSet)
-router.register(r'alert-statuses', AlertStatusViewSet)
+router.register(r'alert-severities', AlertSeverityViewSet, basename='alert-severity')
+router.register(r'alert-statuses', AlertStatusViewSet, basename='alert-status')
 router.register(r'alerts', AlertViewSet)
 router.register(r'alert-comments', AlertCommentViewSet)
 router.register(r'alert-custom-field-definitions', AlertCustomFieldDefinitionViewSet)

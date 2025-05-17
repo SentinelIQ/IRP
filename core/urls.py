@@ -44,16 +44,21 @@ alert_mitre_router.register(r'mitre-techniques', AlertMitreTechniqueViewSet, bas
 urlpatterns = [
     path('admin/', admin.site.urls),
     
+    # Incluir routers de casos e alertas diretamente
+    path('api/v2/', include(cases_router.urls)),
+    path('api/v2/', include(alerts_router.urls)),
+    
     # Módulos modularizados na API v2
     path('api/v2/', include('irp.accounts.urls')),  # Alterado para incluir na raiz da API v2
-    path('api/v2/alerts/', include('irp.alerts.urls')),
+    path('api/v2/', include('irp.alerts.urls')),
+    path('api/v2/', include('irp.cases.urls')),
     path('api/v2/observables/', include('irp.observables.urls')),
     path('api/v2/timeline/', include('irp.timeline.urls')),
     path('api/v2/mitre/', include('irp.mitre.urls')),
     path('api/v2/metrics/', include('irp.metrics.urls')),
     path('api/v2/knowledge-base/', include('irp.knowledge_base.urls')),
     path('api/v2/notifications/', include('irp.notifications.urls')),
-    path('api/v2/audit/', include('irp.audit.urls')),
+    path('api/v2/', include('irp.audit.urls')),
     path('api/v2/integrations/misp/', include('irp.integrations.misp.urls')),
     # Temporarily disabled due to weasyprint dependency issue
     # path('api/v2/reports/', include('irp.reports.urls')),
