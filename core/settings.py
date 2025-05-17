@@ -41,9 +41,24 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework.authtoken',
     'drf_spectacular',  # API documentation
-    'api',
+    # 'api',  # Temporariamente comentado para as migrações
     'django_celery_beat',
     'django_celery_results',
+    
+    # Novos módulos modularizados
+    'irp.common.apps.CommonConfig',
+    'irp.accounts.apps.AccountsConfig',
+    'irp.alerts.apps.AlertsConfig',
+    'irp.observables.apps.ObservablesConfig',
+    'irp.timeline.apps.TimelineConfig',
+    'irp.mitre.apps.MitreConfig',
+    'irp.cases.apps.CasesConfig',
+    'irp.metrics.apps.MetricsConfig',
+    'irp.knowledge_base.apps.KnowledgeBaseConfig',
+    'irp.notifications.apps.NotificationsConfig',
+    'irp.audit.apps.AuditConfig',
+    'irp.integrations.apps.IntegrationsConfig',
+    'irp.reports.apps.ReportsConfig',
 ]
 
 MIDDLEWARE = [
