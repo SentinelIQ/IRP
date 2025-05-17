@@ -3,6 +3,7 @@ from rest_framework.response import Response
 from rest_framework.decorators import action
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
+from django.db import transaction
 
 from .models import ObservableType, TLPLevel, PAPLevel, Observable
 from irp.cases.models import CaseObservable
@@ -25,6 +26,18 @@ class ObservableTypeViewSet(viewsets.ModelViewSet):
     serializer_class = ObservableTypeSerializer
     permission_classes = [permissions.IsAuthenticated, HasRolePermission]
     required_permission = 'manage_observable_settings'
+    
+    @audit_action(entity_type='OBSERVABLE_TYPE', action_type='CREATE')
+    def perform_create(self, serializer):
+        return super().perform_create(serializer)
+        
+    @audit_action(entity_type='OBSERVABLE_TYPE', action_type='UPDATE')
+    def perform_update(self, serializer):
+        return super().perform_update(serializer)
+        
+    @audit_action(entity_type='OBSERVABLE_TYPE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
 
 
 class TLPLevelViewSet(viewsets.ModelViewSet):
@@ -32,6 +45,18 @@ class TLPLevelViewSet(viewsets.ModelViewSet):
     serializer_class = TLPLevelSerializer
     permission_classes = [permissions.IsAuthenticated, HasRolePermission]
     required_permission = 'manage_observable_settings'
+    
+    @audit_action(entity_type='TLP_LEVEL', action_type='CREATE')
+    def perform_create(self, serializer):
+        return super().perform_create(serializer)
+        
+    @audit_action(entity_type='TLP_LEVEL', action_type='UPDATE')
+    def perform_update(self, serializer):
+        return super().perform_update(serializer)
+        
+    @audit_action(entity_type='TLP_LEVEL', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
 
 
 class PAPLevelViewSet(viewsets.ModelViewSet):
@@ -39,6 +64,18 @@ class PAPLevelViewSet(viewsets.ModelViewSet):
     serializer_class = PAPLevelSerializer
     permission_classes = [permissions.IsAuthenticated, HasRolePermission]
     required_permission = 'manage_observable_settings'
+    
+    @audit_action(entity_type='PAP_LEVEL', action_type='CREATE')
+    def perform_create(self, serializer):
+        return super().perform_create(serializer)
+        
+    @audit_action(entity_type='PAP_LEVEL', action_type='UPDATE')
+    def perform_update(self, serializer):
+        return super().perform_update(serializer)
+        
+    @audit_action(entity_type='PAP_LEVEL', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
 
 
 class ObservableViewSet(viewsets.ModelViewSet):
@@ -82,6 +119,19 @@ class ObservableViewSet(viewsets.ModelViewSet):
             added_by=user
         )
     
+    @audit_action(entity_type='OBSERVABLE', action_type='UPDATE')
+    def perform_update(self, serializer):
+        observable = self.get_object()
+        serializer.save(updated_by=self.request.user)
+    
+    @audit_action(entity_type='OBSERVABLE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
+
+    @audit_action(entity_type='OBSERVABLE', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
+
     @action(detail=False, methods=['post'])
     @audit_action(entity_type='OBSERVABLE', action_type='EXTRACT')
     def extract_from_text(self, request):
@@ -247,3 +297,7 @@ class CaseObservableViewSet(viewsets.ModelViewSet):
         )
         
         return super().destroy(request, *args, **kwargs)
+
+    @audit_action(entity_type='CASE_OBSERVABLE', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)

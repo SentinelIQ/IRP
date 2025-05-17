@@ -6,7 +6,7 @@ from rest_framework.response import Response
 from rest_framework.authtoken.models import Token
 from rest_framework import status
 from django.contrib.auth import authenticate
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes, action
 
 from .models import Organization, Team, Profile, Role, Permission, UserRole, RolePermission
 from .serializers import (
@@ -14,7 +14,9 @@ from .serializers import (
     RoleSerializer, PermissionSerializer, UserRoleSerializer,
     RolePermissionSerializer, UserSerializer
 )
-from irp.common.permissions import HasRolePermission
+from irp.common.permissions import HasRolePermission, has_permission
+from irp.common.audit import audit_action
+from irp.audit.services import AuditService
 
 
 class OrganizationViewSet(viewsets.ModelViewSet):
@@ -22,6 +24,22 @@ class OrganizationViewSet(viewsets.ModelViewSet):
     serializer_class = OrganizationSerializer
     permission_classes = [permissions.IsAuthenticated, HasRolePermission]
     required_permission = 'manage_organizations'
+    
+    @audit_action(entity_type='ORGANIZATION', action_type='CREATE')
+    def perform_create(self, serializer):
+        return super().perform_create(serializer)
+        
+    @audit_action(entity_type='ORGANIZATION', action_type='UPDATE')
+    def perform_update(self, serializer):
+        return super().perform_update(serializer)
+        
+    @audit_action(entity_type='ORGANIZATION', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
+        
+    @audit_action(entity_type='ORGANIZATION', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
 
 
 class TeamViewSet(viewsets.ModelViewSet):
@@ -32,48 +50,73 @@ class TeamViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         # Verificar se estamos acessando por uma rota aninhada (organização específica)
-        organization_id = self.kwargs.get('organization_pk')
-        
-        user = self.request.user
-        if organization_id:
-            # Verificar se o usuário pode acessar esta organização
+        if 'organization_pk' in self.kwargs:
+            organization_id = self.kwargs['organization_pk']
+            # Verificar se o usuário tem permissão para acessar esta organização
+            user = self.request.user
+            if user.profile.organization.organization_id == int(organization_id) or user.profile.is_system_admin:
+                return Team.objects.filter(organization__organization_id=organization_id)
+            else:
+                return Team.objects.none()
+        else:
+            # Não estamos numa rota aninhada, aplicar filtro por organização do usuário
+            user = self.request.user
             if user.profile.is_system_admin:
-                return Team.objects.filter(organization_id=organization_id)
-            elif hasattr(user, 'profile') and user.profile.organization and \
-                 str(user.profile.organization.organization_id) == organization_id:
-                return Team.objects.filter(organization_id=organization_id)
-            return Team.objects.none()
-        
-        # Isolamento multi-tenant: só times da organização do usuário
-        if hasattr(user, 'profile') and user.profile.organization:
-            return Team.objects.filter(organization=user.profile.organization)
-        return Team.objects.none()
-
+                return Team.objects.all()
+            else:
+                return Team.objects.filter(organization=user.profile.organization)
+    
+    @audit_action(entity_type='TEAM', action_type='CREATE')
     def perform_create(self, serializer):
         # Verificar se estamos acessando por uma rota aninhada (organização específica)
-        organization_id = self.kwargs.get('organization_pk')
-        
-        if organization_id:
-            from .models import Organization
+        if 'organization_pk' in self.kwargs:
+            # Obter organização a partir da URL
+            organization_id = self.kwargs['organization_pk']
             try:
                 organization = Organization.objects.get(organization_id=organization_id)
                 serializer.save(organization=organization)
-                return
             except Organization.DoesNotExist:
-                pass
-        
-        # Caso padrão: usar a organização do usuário
-        user = self.request.user
-        if hasattr(user, 'profile') and user.profile.organization:
-            serializer.save(organization=user.profile.organization)
+                raise serializers.ValidationError({'organization': 'Organização não encontrada'})
         else:
-            serializer.save()
+            # Utilizar organização do usuário
+            user = self.request.user
+            if not user.profile.organization:
+                raise serializers.ValidationError({'organization': 'Usuário não está associado a uma organização'})
+            serializer.save(organization=user.profile.organization)
+            
+    @audit_action(entity_type='TEAM', action_type='UPDATE')
+    def perform_update(self, serializer):
+        return super().perform_update(serializer)
+        
+    @audit_action(entity_type='TEAM', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
+        
+    @audit_action(entity_type='TEAM', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
 
 
 class ProfileViewSet(viewsets.ModelViewSet):
     queryset = Profile.objects.all()
     serializer_class = ProfileSerializer
     permission_classes = [permissions.IsAuthenticated]
+    
+    @audit_action(entity_type='PROFILE', action_type='CREATE')
+    def perform_create(self, serializer):
+        return super().perform_create(serializer)
+        
+    @audit_action(entity_type='PROFILE', action_type='UPDATE')
+    def perform_update(self, serializer):
+        return super().perform_update(serializer)
+        
+    @audit_action(entity_type='PROFILE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
+        
+    @audit_action(entity_type='PROFILE', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
 
 
 class RoleViewSet(viewsets.ModelViewSet):
@@ -81,6 +124,22 @@ class RoleViewSet(viewsets.ModelViewSet):
     serializer_class = RoleSerializer
     permission_classes = [permissions.IsAuthenticated, HasRolePermission]
     required_permission = 'manage_roles'
+    
+    @audit_action(entity_type='ROLE', action_type='CREATE')
+    def perform_create(self, serializer):
+        return super().perform_create(serializer)
+        
+    @audit_action(entity_type='ROLE', action_type='UPDATE')
+    def perform_update(self, serializer):
+        return super().perform_update(serializer)
+        
+    @audit_action(entity_type='ROLE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
+        
+    @audit_action(entity_type='ROLE', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
 
 
 class PermissionViewSet(viewsets.ModelViewSet):
@@ -88,6 +147,22 @@ class PermissionViewSet(viewsets.ModelViewSet):
     serializer_class = PermissionSerializer
     permission_classes = [permissions.IsAuthenticated, HasRolePermission]
     required_permission = 'manage_permissions'
+    
+    @audit_action(entity_type='PERMISSION', action_type='CREATE')
+    def perform_create(self, serializer):
+        return super().perform_create(serializer)
+        
+    @audit_action(entity_type='PERMISSION', action_type='UPDATE')
+    def perform_update(self, serializer):
+        return super().perform_update(serializer)
+        
+    @audit_action(entity_type='PERMISSION', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
+        
+    @audit_action(entity_type='PERMISSION', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
 
 
 class UserRoleViewSet(viewsets.ModelViewSet):
@@ -95,6 +170,22 @@ class UserRoleViewSet(viewsets.ModelViewSet):
     serializer_class = UserRoleSerializer
     permission_classes = [permissions.IsAuthenticated, HasRolePermission]
     required_permission = 'assign_roles'
+    
+    @audit_action(entity_type='USER_ROLE', action_type='CREATE')
+    def perform_create(self, serializer):
+        return super().perform_create(serializer)
+        
+    @audit_action(entity_type='USER_ROLE', action_type='UPDATE')
+    def perform_update(self, serializer):
+        return super().perform_update(serializer)
+        
+    @audit_action(entity_type='USER_ROLE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
+        
+    @audit_action(entity_type='USER_ROLE', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
 
 
 class RolePermissionViewSet(viewsets.ModelViewSet):
@@ -102,6 +193,22 @@ class RolePermissionViewSet(viewsets.ModelViewSet):
     serializer_class = RolePermissionSerializer
     permission_classes = [permissions.IsAuthenticated, HasRolePermission]
     required_permission = 'assign_permissions'
+    
+    @audit_action(entity_type='ROLE_PERMISSION', action_type='CREATE')
+    def perform_create(self, serializer):
+        return super().perform_create(serializer)
+        
+    @audit_action(entity_type='ROLE_PERMISSION', action_type='UPDATE')
+    def perform_update(self, serializer):
+        return super().perform_update(serializer)
+        
+    @audit_action(entity_type='ROLE_PERMISSION', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
+        
+    @audit_action(entity_type='ROLE_PERMISSION', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
 
 
 class UserViewSet(viewsets.ModelViewSet):
@@ -109,10 +216,23 @@ class UserViewSet(viewsets.ModelViewSet):
     serializer_class = UserSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    @audit_action(entity_type='USER', action_type='CREATE')
     def perform_create(self, serializer):
         user = serializer.save()
         # Cria perfil automaticamente
         Profile.objects.create(user=user)
+
+    @audit_action(entity_type='USER', action_type='UPDATE')    
+    def perform_update(self, serializer):
+        return super().perform_update(serializer)
+        
+    @audit_action(entity_type='USER', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
+        
+    @audit_action(entity_type='USER', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
 
     def get_queryset(self):
         # Usuário só vê a si mesmo ou membros da sua organização
@@ -130,8 +250,14 @@ class HelloWorldView(APIView):
     """
     permission_classes = [permissions.IsAuthenticated]
     
+    @audit_action(entity_type='API', action_type='TEST')
     def get(self, request):
-        return Response({'message': 'Hello World!'})
+        user = request.user
+        return Response({
+            "message": f"Hello, {user.username}! Welcome to IRP API.",
+            "authenticated": True,
+            "user_id": user.id
+        })
 
 
 class LoginView(APIView):
@@ -140,6 +266,7 @@ class LoginView(APIView):
     """
     permission_classes = [permissions.AllowAny]
     
+    @audit_action(entity_type='AUTH', action_type='LOGIN')
     def post(self, request):
         username = request.data.get('username')
         password = request.data.get('password')
@@ -173,15 +300,27 @@ class LogoutView(APIView):
     """
     permission_classes = [permissions.IsAuthenticated]
     
+    @audit_action(entity_type='AUTH', action_type='LOGOUT')
     def post(self, request):
         # Delete the token to logout
         try:
             request.user.auth_token.delete()
-            return Response({'message': 'Successfully logged out'}, 
-                           status=status.HTTP_200_OK)
+            
+            # Registrar logout para auditoria
+            user = request.user
+            if user and hasattr(user, 'profile') and user.profile and user.profile.organization:
+                AuditService.log_action(
+                    user=user,
+                    organization=user.profile.organization,
+                    entity_type='USER',
+                    entity_id=str(user.id),
+                    action_type='LOGOUT',
+                    request=request
+                )
+            
+            return Response({"message": "Successfully logged out."}, status=status.HTTP_200_OK)
         except Exception as e:
-            return Response({'error': str(e)}, 
-                           status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class ChangePasswordView(APIView):
@@ -190,6 +329,7 @@ class ChangePasswordView(APIView):
     """
     permission_classes = [permissions.IsAuthenticated]
     
+    @audit_action(entity_type='USER', action_type='CHANGE_PASSWORD')
     def post(self, request):
         user = request.user
         current_password = request.data.get('current_password')
@@ -239,6 +379,7 @@ class AdminResetPasswordView(APIView):
     permission_classes = [permissions.IsAuthenticated, HasRolePermission]
     required_permission = 'user:edit'
     
+    @audit_action(entity_type='USER', action_type='ADMIN_RESET_PASSWORD')
     def post(self, request, user_id):
         try:
             target_user = User.objects.get(id=user_id)
@@ -283,30 +424,32 @@ class AdminResetPasswordView(APIView):
         if hasattr(target_user, 'auth_token'):
             target_user.auth_token.delete()
         
+        # Registrar na auditoria a troca de senha (pelo admin)
+        if hasattr(admin_user, 'profile') and admin_user.profile.organization:
+            AuditService.log_action(
+                user=admin_user,
+                organization=admin_user.profile.organization,
+                entity_type='USER',
+                entity_id=str(target_user.id),
+                action_type='PASSWORD_RESET',
+                details_after={'reset_by_admin': admin_user.username},
+                request=request
+            )
+        
         return Response({
             'message': f'Senha do usuário {target_user.username} redefinida com sucesso'
         })
 
 
 @api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+@audit_action(entity_type='API', action_type='STATUS')
 def test_api_status(request):
     """
-    View para testar se a API está funcionando corretamente.
+    Endpoint to test if the API is up and running.
     """
     return Response({
         "status": "ok",
-        "message": "API V2 está funcionando corretamente",
-        "modules": [
-            "accounts", 
-            "alerts", 
-            "cases", 
-            "observables", 
-            "timeline", 
-            "knowledge_base", 
-            "metrics", 
-            "notifications", 
-            "audit", 
-            "mitre",
-            "integrations"
-        ]
-    })
+        "message": "API is running",
+        "version": "1.0.0"
+    }, status=status.HTTP_200_OK)

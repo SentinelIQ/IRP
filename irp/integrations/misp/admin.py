@@ -1,12 +1,15 @@
 from django.contrib import admin
-from .models import MISPInstance, MISPImport, MISPExport, ObservableMISPMapping
+from .models import (
+    MISPInstance, MISPImport, MISPExport, ObservableMISPMapping,
+    MISPTaxonomy, MISPTaxonomyEntry, CaseTaxonomyTag, AlertTaxonomyTag, ObservableTaxonomyTag
+)
 
 @admin.register(MISPInstance)
 class MISPInstanceAdmin(admin.ModelAdmin):
-    list_display = ('name', 'url', 'organization', 'is_active', 'last_import_timestamp')
-    list_filter = ('is_active', 'organization')
+    list_display = ('name', 'url', 'organization', 'is_active', 'last_import_timestamp', 'import_taxonomies', 'last_taxonomy_sync_timestamp')
+    list_filter = ('is_active', 'organization', 'import_taxonomies')
     search_fields = ('name', 'url')
-    readonly_fields = ('instance_id', 'created_at', 'updated_at')
+    readonly_fields = ('instance_id', 'created_at', 'updated_at', 'last_taxonomy_sync_timestamp')
     fieldsets = (
         ('Informações Básicas', {
             'fields': ('instance_id', 'name', 'organization', 'is_active')
@@ -16,10 +19,10 @@ class MISPInstanceAdmin(admin.ModelAdmin):
         }),
         ('Configurações de Exportação/Importação', {
             'fields': ('default_distribution', 'default_threat_level', 'default_analysis',
-                       'import_filter_tags', 'export_default_tags')
+                       'import_filter_tags', 'export_default_tags', 'import_taxonomies')
         }),
         ('Metadados', {
-            'fields': ('last_import_timestamp', 'created_at', 'updated_at')
+            'fields': ('last_import_timestamp', 'last_taxonomy_sync_timestamp', 'created_at', 'updated_at')
         }),
     )
 
@@ -85,4 +88,81 @@ class ObservableMISPMappingAdmin(admin.ModelAdmin):
         ('Metadados', {
             'fields': ('last_sync_timestamp',)
         }),
-    ) 
+    )
+
+
+@admin.register(MISPTaxonomy)
+class MISPTaxonomyAdmin(admin.ModelAdmin):
+    list_display = ('namespace', 'misp_instance', 'description', 'version', 'enabled_for_platform', 'synced_at')
+    list_filter = ('misp_instance', 'enabled_for_platform')
+    search_fields = ('namespace', 'description')
+    readonly_fields = ('taxonomy_id', 'synced_at')
+    actions = ['enable_taxonomies', 'disable_taxonomies']
+    
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        return qs.select_related('misp_instance')
+    
+    def enable_taxonomies(self, request, queryset):
+        queryset.update(enabled_for_platform=True)
+        self.message_user(request, f"{queryset.count()} taxonomias habilitadas com sucesso.")
+    enable_taxonomies.short_description = "Habilitar taxonomias selecionadas"
+    
+    def disable_taxonomies(self, request, queryset):
+        queryset.update(enabled_for_platform=False)
+        self.message_user(request, f"{queryset.count()} taxonomias desabilitadas com sucesso.")
+    disable_taxonomies.short_description = "Desabilitar taxonomias selecionadas"
+
+
+@admin.register(MISPTaxonomyEntry)
+class MISPTaxonomyEntryAdmin(admin.ModelAdmin):
+    list_display = ('tag_name', 'taxonomy', 'predicate', 'value', 'numerical_value')
+    list_filter = ('taxonomy__namespace', 'taxonomy')
+    search_fields = ('predicate', 'value', 'description_expanded')
+    readonly_fields = ('entry_id',)
+    
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        return qs.select_related('taxonomy')
+
+
+class BaseTaxonomyTagAdmin(admin.ModelAdmin):
+    """Base class for taxonomy tag admin"""
+    readonly_fields = ('linked_at',)
+    
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        return qs.select_related('taxonomy_entry', 'taxonomy_entry__taxonomy', 'linked_by')
+    
+    def tag_name(self, obj):
+        return obj.taxonomy_entry.tag_name
+    tag_name.short_description = "Tag"
+    
+    def taxonomy(self, obj):
+        return obj.taxonomy_entry.taxonomy.namespace
+    taxonomy.short_description = "Taxonomia"
+    
+    def linked_by_username(self, obj):
+        return obj.linked_by.username if obj.linked_by else "-"
+    linked_by_username.short_description = "Usuário"
+
+
+@admin.register(CaseTaxonomyTag)
+class CaseTaxonomyTagAdmin(BaseTaxonomyTagAdmin):
+    list_display = ('tag_name', 'case', 'taxonomy', 'linked_by_username', 'linked_at')
+    list_filter = ('taxonomy_entry__taxonomy__namespace', 'linked_at')
+    search_fields = ('case__title', 'taxonomy_entry__predicate', 'taxonomy_entry__value')
+
+
+@admin.register(AlertTaxonomyTag)
+class AlertTaxonomyTagAdmin(BaseTaxonomyTagAdmin):
+    list_display = ('tag_name', 'alert', 'taxonomy', 'linked_by_username', 'linked_at')
+    list_filter = ('taxonomy_entry__taxonomy__namespace', 'linked_at')
+    search_fields = ('alert__title', 'taxonomy_entry__predicate', 'taxonomy_entry__value')
+
+
+@admin.register(ObservableTaxonomyTag)
+class ObservableTaxonomyTagAdmin(BaseTaxonomyTagAdmin):
+    list_display = ('tag_name', 'observable', 'taxonomy', 'linked_by_username', 'linked_at')
+    list_filter = ('taxonomy_entry__taxonomy__namespace', 'linked_at')
+    search_fields = ('observable__value', 'taxonomy_entry__predicate', 'taxonomy_entry__value') 

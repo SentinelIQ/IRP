@@ -1,10 +1,13 @@
 from rest_framework import viewsets, permissions, status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.response import Response
 from django.db.models import Q
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from irp.common.permissions import HasRolePermission
+from irp.common.audit import audit_action
 from .models import KBCategory, KBArticle, KBArticleVersion
 from .serializers import KBCategorySerializer, KBArticleSerializer, KBArticleVersionSerializer
-from irp.common.permissions import HasRolePermission
 from irp.cases.models import Case
 from irp.alerts.models import Alert
 
@@ -13,21 +16,69 @@ class KBCategoryViewSet(viewsets.ModelViewSet):
     serializer_class = KBCategorySerializer
     permission_classes = [permissions.IsAuthenticated, HasRolePermission]
     required_permission = 'manage_kb'
+    
+    @audit_action(entity_type='KB_CATEGORY', action_type='CREATE')
+    def perform_create(self, serializer):
+        return super().perform_create(serializer)
+        
+    @audit_action(entity_type='KB_CATEGORY', action_type='UPDATE')
+    def perform_update(self, serializer):
+        return super().perform_update(serializer)
+        
+    @audit_action(entity_type='KB_CATEGORY', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
 
 class KBArticleViewSet(viewsets.ModelViewSet):
     queryset = KBArticle.objects.all()
     serializer_class = KBArticleSerializer
     permission_classes = [permissions.IsAuthenticated, HasRolePermission]
     required_permission = 'manage_kb'
+    
+    @audit_action(entity_type='KB_ARTICLE', action_type='CREATE')
+    def perform_create(self, serializer):
+        serializer.save(author=self.request.user)
+        
+    @audit_action(entity_type='KB_ARTICLE', action_type='UPDATE')
+    def perform_update(self, serializer):
+        # Criar uma nova versão do artigo
+        article = self.get_object()
+        version = article.version + 1
+        
+        # Salvar a versão anterior
+        KBArticleVersion.objects.create(
+            article=article,
+            version_number=article.version,
+            title=article.title,
+            content=article.content,
+            author=article.author,
+            changed_at=article.updated_at
+        )
+        
+        # Atualizar o artigo
+        serializer.save(version=version)
+        
+    @audit_action(entity_type='KB_ARTICLE', action_type='DELETE')
+    def destroy(self, request, *args, **kwargs):
+        return super().destroy(request, *args, **kwargs)
+        
+    @audit_action(entity_type='KB_ARTICLE', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
 
 class KBArticleVersionViewSet(viewsets.ModelViewSet):
     queryset = KBArticleVersion.objects.all()
     serializer_class = KBArticleVersionSerializer
     permission_classes = [permissions.IsAuthenticated, HasRolePermission]
     required_permission = 'manage_kb'
+    
+    @audit_action(entity_type='KB_ARTICLE_VERSION', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
 
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
+@audit_action(entity_type='KNOWLEDGE_BASE', action_type='SEARCH')
 def kb_search(request):
     """
     Endpoint para busca avançada na base de conhecimento.
@@ -73,6 +124,7 @@ def kb_search(request):
 
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
+@audit_action(entity_type='KNOWLEDGE_BASE', action_type='VIEW_RELATED')
 def kb_related_articles(request, entity_type, entity_id):
     """
     Endpoint para sugerir artigos da base de conhecimento relacionados 

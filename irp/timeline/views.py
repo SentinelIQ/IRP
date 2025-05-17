@@ -13,6 +13,8 @@ from irp.common.permissions import HasRolePermission
 from irp.common.audit import audit_action
 from irp.common.websocket import WebSocketService
 
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
+
 class TimelineEventViewSet(viewsets.ReadOnlyModelViewSet):
     """
     API endpoint for retrieving timeline events for a specific case.
@@ -27,6 +29,14 @@ class TimelineEventViewSet(viewsets.ReadOnlyModelViewSet):
     ordering = ['-occurred_at']
     search_fields = ['description', 'event_type', 'metadata']
     
+    @audit_action(entity_type='TIMELINE_EVENT', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
+        
+    @audit_action(entity_type='TIMELINE_EVENT', action_type='LIST')
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
     def get_queryset(self):
         case_id = self.kwargs.get('case_pk')
         user = self.request.user
@@ -130,6 +140,7 @@ class TimelineEventViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(result_serializer.data, status=status.HTTP_201_CREATED)
     
     @action(detail=False, methods=['get'])
+    @audit_action(entity_type='TIMELINE_EVENT', action_type='GET_SUMMARY')
     def summary(self, request, case_pk=None):
         """
         Obtém um resumo dos eventos da timeline, agrupados por tipo de evento
@@ -206,6 +217,7 @@ class TimelineEventViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(summary)
     
     @action(detail=False, methods=['get'])
+    @audit_action(entity_type='TIMELINE_EVENT', action_type='GET_RECENT')
     def recent(self, request, case_pk=None):
         """
         Obtém os eventos mais recentes da timeline, filtrados por tipo
@@ -246,6 +258,7 @@ class TimelineEventViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(serializer.data)
     
     @action(detail=False, methods=['get'])
+    @audit_action(entity_type='TIMELINE_EVENT', action_type='GET_IMPORTANT')
     def important(self, request, case_pk=None):
         """
         Obtém eventos importantes da timeline

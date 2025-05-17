@@ -4,12 +4,20 @@ from rest_framework.response import Response
 from django.db import models
 import logging
 
-from irp.integrations.misp.models import MISPInstance, MISPImport, MISPExport
+from irp.integrations.misp.models import (
+    MISPInstance, MISPImport, MISPExport, MISPTaxonomy, MISPTaxonomyEntry,
+    CaseTaxonomyTag, AlertTaxonomyTag, ObservableTaxonomyTag
+)
 from irp.integrations.misp.serializers import (
     MISPInstanceSerializer, MISPImportSerializer, MISPExportSerializer,
-    TriggerMISPImportSerializer, ExportCaseToMISPSerializer
+    TriggerMISPImportSerializer, ExportCaseToMISPSerializer,
+    MISPTaxonomySerializer, MISPTaxonomyEntrySerializer,
+    CaseTaxonomyTagSerializer, AlertTaxonomyTagSerializer, ObservableTaxonomyTagSerializer,
+    TaxonomyTagInputSerializer
 )
 from irp.cases.models import Case
+from irp.alerts.models import Alert
+from irp.observables.models import Observable
 from irp.common.permissions import HasRolePermission, has_permission
 from irp.audit.services import AuditService
 
@@ -380,5 +388,598 @@ def export_case_to_misp(request, case_id):
     except Exception as e:
         return Response(
             {"detail": f"Erro ao exportar para MISP: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated, HasRolePermission])
+def sync_taxonomies(request, instance_id):
+    """
+    Endpoint para sincronizar taxonomias de uma instância MISP
+    """
+    # Verificar permissão específica
+    if not has_permission(request.user, 'manage_organizations'):
+        return Response(
+            {"detail": "Você não tem permissão para sincronizar taxonomias"},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    force_update = request.data.get('force_update', False)
+    
+    try:
+        # Obter instância MISP
+        misp_instance = MISPInstance.objects.get(instance_id=instance_id)
+        
+        # Verificar se o usuário tem acesso à instância (multi-tenant)
+        if (not request.user.is_superuser 
+            and not getattr(request.user.profile, 'is_system_admin', False)
+            and misp_instance.organization 
+            and misp_instance.organization != request.user.profile.organization):
+            return Response(
+                {"detail": "Você não tem acesso a esta instância MISP"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Sincronizar taxonomias
+        from irp.integrations.misp.services import MISPService
+        result = MISPService.sync_taxonomies(misp_instance, force_update=force_update)
+        
+        # Registrar auditoria
+        AuditService.log(
+            user=request.user,
+            organization=misp_instance.organization,
+            entity_type='MISP_INSTANCE',
+            entity_id=misp_instance.instance_id,
+            action_type='SYNC_TAXONOMIES',
+            details_after=result
+        )
+        
+        return Response(result)
+        
+    except MISPInstance.DoesNotExist:
+        return Response(
+            {"detail": "Instância MISP não encontrada"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        return Response(
+            {"detail": f"Erro ao sincronizar taxonomias: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+class MISPTaxonomyViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint para visualizar taxonomias MISP
+    """
+    queryset = MISPTaxonomy.objects.all()
+    serializer_class = MISPTaxonomySerializer
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'observable:view'  # Mesma permissão para visualizar observáveis
+    
+    def get_queryset(self):
+        # Isolamento multi-tenant: só taxonomias da organização do usuário
+        if not self.request.user.is_authenticated:
+            return MISPTaxonomy.objects.none()
+            
+        if self.request.user.is_superuser or getattr(self.request.user.profile, 'is_system_admin', False):
+            return MISPTaxonomy.objects.all().order_by('namespace')
+            
+        # Usuário comum só vê taxonomias de instâncias MISP da própria organização
+        if hasattr(self.request.user, 'profile') and self.request.user.profile.organization:
+            organization = self.request.user.profile.organization
+            return MISPTaxonomy.objects.filter(
+                misp_instance__organization=organization,
+                enabled_for_platform=True
+            ).order_by('namespace')
+        return MISPTaxonomy.objects.none()
+    
+    @action(detail=True, methods=['get'])
+    def entries(self, request, pk=None):
+        """
+        Retorna as entradas de uma taxonomia específica
+        """
+        taxonomy = self.get_object()
+        entries = MISPTaxonomyEntry.objects.filter(taxonomy=taxonomy).order_by('predicate', 'value')
+        serializer = MISPTaxonomyEntrySerializer(entries, many=True)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def search(self, request):
+        """
+        Busca taxonomias e entradas por termo de pesquisa
+        """
+        query = request.query_params.get('q', '')
+        if len(query) < 2:
+            return Response({"detail": "Termo de pesquisa muito curto"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        queryset = self.get_queryset()
+        
+        # Buscar taxonomias pelo namespace ou descrição
+        taxonomy_results = queryset.filter(
+            models.Q(namespace__icontains=query) | 
+            models.Q(description__icontains=query)
+        )
+        
+        # Buscar entradas pelo predicado ou valor
+        entry_results = MISPTaxonomyEntry.objects.filter(
+            models.Q(predicate__icontains=query) | 
+            models.Q(value__icontains=query) |
+            models.Q(description_expanded__icontains=query),
+            taxonomy__in=queryset
+        )
+        
+        # Serializar resultados
+        taxonomy_serializer = MISPTaxonomySerializer(taxonomy_results, many=True)
+        entry_serializer = MISPTaxonomyEntrySerializer(entry_results, many=True)
+        
+        return Response({
+            "taxonomies": taxonomy_serializer.data,
+            "entries": entry_serializer.data
+        })
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated, HasRolePermission])
+def add_taxonomy_tag_to_case(request, case_id):
+    """
+    Adiciona uma tag de taxonomia a um caso
+    """
+    # Verificar permissão
+    if not has_permission(request.user, 'case:edit'):
+        return Response(
+            {"detail": "Você não tem permissão para editar casos"},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    # Validar tag de entrada
+    serializer = TaxonomyTagInputSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        # Obter caso
+        case = Case.objects.get(case_id=case_id)
+        
+        # Verificar acesso ao caso (multi-tenant)
+        if (not request.user.is_superuser 
+            and not getattr(request.user.profile, 'is_system_admin', False)
+            and case.organization != request.user.profile.organization):
+            return Response(
+                {"detail": "Você não tem acesso a este caso"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Obter entrada de taxonomia
+        taxonomy_entry = MISPTaxonomyEntry.objects.get(entry_id=serializer.validated_data['taxonomy_entry_id'])
+        
+        # Adicionar tag ao caso
+        tag, created = CaseTaxonomyTag.objects.get_or_create(
+            case=case,
+            taxonomy_entry=taxonomy_entry,
+            defaults={'linked_by': request.user}
+        )
+        
+        # Registrar auditoria
+        AuditService.log(
+            user=request.user,
+            organization=case.organization,
+            entity_type='CASE',
+            entity_id=case.case_id,
+            action_type='ADD_TAXONOMY_TAG',
+            details_after={
+                'taxonomy_namespace': taxonomy_entry.taxonomy.namespace,
+                'predicate': taxonomy_entry.predicate,
+                'value': taxonomy_entry.value,
+                'tag_name': taxonomy_entry.tag_name
+            }
+        )
+        
+        return Response({
+            "status": "success",
+            "message": f"Tag '{taxonomy_entry.tag_name}' adicionada ao caso",
+            "created": created
+        })
+        
+    except Case.DoesNotExist:
+        return Response(
+            {"detail": "Caso não encontrado"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except MISPTaxonomyEntry.DoesNotExist:
+        return Response(
+            {"detail": "Entrada de taxonomia não encontrada"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        return Response(
+            {"detail": f"Erro ao adicionar tag: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['DELETE'])
+@permission_classes([permissions.IsAuthenticated, HasRolePermission])
+def remove_taxonomy_tag_from_case(request, case_id, tag_id):
+    """
+    Remove uma tag de taxonomia de um caso
+    """
+    # Verificar permissão
+    if not has_permission(request.user, 'case:edit'):
+        return Response(
+            {"detail": "Você não tem permissão para editar casos"},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    try:
+        # Obter caso
+        case = Case.objects.get(case_id=case_id)
+        
+        # Verificar acesso ao caso (multi-tenant)
+        if (not request.user.is_superuser 
+            and not getattr(request.user.profile, 'is_system_admin', False)
+            and case.organization != request.user.profile.organization):
+            return Response(
+                {"detail": "Você não tem acesso a este caso"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Obter tag
+        tag = CaseTaxonomyTag.objects.get(
+            case=case,
+            taxonomy_entry__entry_id=tag_id
+        )
+        
+        # Salvar informações para auditoria
+        taxonomy_entry = tag.taxonomy_entry
+        tag_info = {
+            'taxonomy_namespace': taxonomy_entry.taxonomy.namespace,
+            'predicate': taxonomy_entry.predicate,
+            'value': taxonomy_entry.value,
+            'tag_name': taxonomy_entry.tag_name
+        }
+        
+        # Remover tag
+        tag.delete()
+        
+        # Registrar auditoria
+        AuditService.log(
+            user=request.user,
+            organization=case.organization,
+            entity_type='CASE',
+            entity_id=case.case_id,
+            action_type='REMOVE_TAXONOMY_TAG',
+            details_before=tag_info
+        )
+        
+        return Response({
+            "status": "success",
+            "message": f"Tag '{tag_info['tag_name']}' removida do caso"
+        })
+        
+    except Case.DoesNotExist:
+        return Response(
+            {"detail": "Caso não encontrado"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except CaseTaxonomyTag.DoesNotExist:
+        return Response(
+            {"detail": "Tag não encontrada para este caso"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        return Response(
+            {"detail": f"Erro ao remover tag: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated, HasRolePermission])
+def add_taxonomy_tag_to_alert(request, alert_id):
+    """
+    Adiciona uma tag de taxonomia a um alerta
+    """
+    # Verificar permissão
+    if not has_permission(request.user, 'alert:edit'):
+        return Response(
+            {"detail": "Você não tem permissão para editar alertas"},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    # Validar tag de entrada
+    serializer = TaxonomyTagInputSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        # Obter alerta
+        alert = Alert.objects.get(alert_id=alert_id)
+        
+        # Verificar acesso ao alerta (multi-tenant)
+        if (not request.user.is_superuser 
+            and not getattr(request.user.profile, 'is_system_admin', False)
+            and alert.organization != request.user.profile.organization):
+            return Response(
+                {"detail": "Você não tem acesso a este alerta"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Obter entrada de taxonomia
+        taxonomy_entry = MISPTaxonomyEntry.objects.get(entry_id=serializer.validated_data['taxonomy_entry_id'])
+        
+        # Adicionar tag ao alerta
+        tag, created = AlertTaxonomyTag.objects.get_or_create(
+            alert=alert,
+            taxonomy_entry=taxonomy_entry,
+            defaults={'linked_by': request.user}
+        )
+        
+        # Registrar auditoria
+        AuditService.log(
+            user=request.user,
+            organization=alert.organization,
+            entity_type='ALERT',
+            entity_id=alert.alert_id,
+            action_type='ADD_TAXONOMY_TAG',
+            details_after={
+                'taxonomy_namespace': taxonomy_entry.taxonomy.namespace,
+                'predicate': taxonomy_entry.predicate,
+                'value': taxonomy_entry.value,
+                'tag_name': taxonomy_entry.tag_name
+            }
+        )
+        
+        return Response({
+            "status": "success",
+            "message": f"Tag '{taxonomy_entry.tag_name}' adicionada ao alerta",
+            "created": created
+        })
+        
+    except Alert.DoesNotExist:
+        return Response(
+            {"detail": "Alerta não encontrado"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except MISPTaxonomyEntry.DoesNotExist:
+        return Response(
+            {"detail": "Entrada de taxonomia não encontrada"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        return Response(
+            {"detail": f"Erro ao adicionar tag: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['DELETE'])
+@permission_classes([permissions.IsAuthenticated, HasRolePermission])
+def remove_taxonomy_tag_from_alert(request, alert_id, tag_id):
+    """
+    Remove uma tag de taxonomia de um alerta
+    """
+    # Verificar permissão
+    if not has_permission(request.user, 'alert:edit'):
+        return Response(
+            {"detail": "Você não tem permissão para editar alertas"},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    try:
+        # Obter alerta
+        alert = Alert.objects.get(alert_id=alert_id)
+        
+        # Verificar acesso ao alerta (multi-tenant)
+        if (not request.user.is_superuser 
+            and not getattr(request.user.profile, 'is_system_admin', False)
+            and alert.organization != request.user.profile.organization):
+            return Response(
+                {"detail": "Você não tem acesso a este alerta"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Obter tag
+        tag = AlertTaxonomyTag.objects.get(
+            alert=alert,
+            taxonomy_entry__entry_id=tag_id
+        )
+        
+        # Salvar informações para auditoria
+        taxonomy_entry = tag.taxonomy_entry
+        tag_info = {
+            'taxonomy_namespace': taxonomy_entry.taxonomy.namespace,
+            'predicate': taxonomy_entry.predicate,
+            'value': taxonomy_entry.value,
+            'tag_name': taxonomy_entry.tag_name
+        }
+        
+        # Remover tag
+        tag.delete()
+        
+        # Registrar auditoria
+        AuditService.log(
+            user=request.user,
+            organization=alert.organization,
+            entity_type='ALERT',
+            entity_id=alert.alert_id,
+            action_type='REMOVE_TAXONOMY_TAG',
+            details_before=tag_info
+        )
+        
+        return Response({
+            "status": "success",
+            "message": f"Tag '{tag_info['tag_name']}' removida do alerta"
+        })
+        
+    except Alert.DoesNotExist:
+        return Response(
+            {"detail": "Alerta não encontrado"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except AlertTaxonomyTag.DoesNotExist:
+        return Response(
+            {"detail": "Tag não encontrada para este alerta"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        return Response(
+            {"detail": f"Erro ao remover tag: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated, HasRolePermission])
+def add_taxonomy_tag_to_observable(request, observable_id):
+    """
+    Adiciona uma tag de taxonomia a um observável
+    """
+    # Verificar permissão
+    if not has_permission(request.user, 'observable:edit'):
+        return Response(
+            {"detail": "Você não tem permissão para editar observáveis"},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    # Validar tag de entrada
+    serializer = TaxonomyTagInputSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        # Obter observável
+        observable = Observable.objects.get(observable_id=observable_id)
+        
+        # Verificar acesso ao observável (multi-tenant)
+        if (not request.user.is_superuser 
+            and not getattr(request.user.profile, 'is_system_admin', False)
+            and observable.organization != request.user.profile.organization):
+            return Response(
+                {"detail": "Você não tem acesso a este observável"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Obter entrada de taxonomia
+        taxonomy_entry = MISPTaxonomyEntry.objects.get(entry_id=serializer.validated_data['taxonomy_entry_id'])
+        
+        # Adicionar tag ao observável
+        tag, created = ObservableTaxonomyTag.objects.get_or_create(
+            observable=observable,
+            taxonomy_entry=taxonomy_entry,
+            defaults={'linked_by': request.user}
+        )
+        
+        # Registrar auditoria
+        AuditService.log(
+            user=request.user,
+            organization=observable.organization,
+            entity_type='OBSERVABLE',
+            entity_id=observable.observable_id,
+            action_type='ADD_TAXONOMY_TAG',
+            details_after={
+                'taxonomy_namespace': taxonomy_entry.taxonomy.namespace,
+                'predicate': taxonomy_entry.predicate,
+                'value': taxonomy_entry.value,
+                'tag_name': taxonomy_entry.tag_name
+            }
+        )
+        
+        return Response({
+            "status": "success",
+            "message": f"Tag '{taxonomy_entry.tag_name}' adicionada ao observável",
+            "created": created
+        })
+        
+    except Observable.DoesNotExist:
+        return Response(
+            {"detail": "Observável não encontrado"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except MISPTaxonomyEntry.DoesNotExist:
+        return Response(
+            {"detail": "Entrada de taxonomia não encontrada"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        return Response(
+            {"detail": f"Erro ao adicionar tag: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['DELETE'])
+@permission_classes([permissions.IsAuthenticated, HasRolePermission])
+def remove_taxonomy_tag_from_observable(request, observable_id, tag_id):
+    """
+    Remove uma tag de taxonomia de um observável
+    """
+    # Verificar permissão
+    if not has_permission(request.user, 'observable:edit'):
+        return Response(
+            {"detail": "Você não tem permissão para editar observáveis"},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    try:
+        # Obter observável
+        observable = Observable.objects.get(observable_id=observable_id)
+        
+        # Verificar acesso ao observável (multi-tenant)
+        if (not request.user.is_superuser 
+            and not getattr(request.user.profile, 'is_system_admin', False)
+            and observable.organization != request.user.profile.organization):
+            return Response(
+                {"detail": "Você não tem acesso a este observável"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Obter tag
+        tag = ObservableTaxonomyTag.objects.get(
+            observable=observable,
+            taxonomy_entry__entry_id=tag_id
+        )
+        
+        # Salvar informações para auditoria
+        taxonomy_entry = tag.taxonomy_entry
+        tag_info = {
+            'taxonomy_namespace': taxonomy_entry.taxonomy.namespace,
+            'predicate': taxonomy_entry.predicate,
+            'value': taxonomy_entry.value,
+            'tag_name': taxonomy_entry.tag_name
+        }
+        
+        # Remover tag
+        tag.delete()
+        
+        # Registrar auditoria
+        AuditService.log(
+            user=request.user,
+            organization=observable.organization,
+            entity_type='OBSERVABLE',
+            entity_id=observable.observable_id,
+            action_type='REMOVE_TAXONOMY_TAG',
+            details_before=tag_info
+        )
+        
+        return Response({
+            "status": "success",
+            "message": f"Tag '{tag_info['tag_name']}' removida do observável"
+        })
+        
+    except Observable.DoesNotExist:
+        return Response(
+            {"detail": "Observável não encontrado"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except ObservableTaxonomyTag.DoesNotExist:
+        return Response(
+            {"detail": "Tag não encontrada para este observável"},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        return Response(
+            {"detail": f"Erro ao remover tag: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         ) 

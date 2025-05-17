@@ -10,7 +10,7 @@ from .serializers import (
 )
 from irp.common.permissions import HasRolePermission, has_permission
 
-from django.shortcuts import render
+from django.shortcuts import render, get_object_or_404
 from django.db.models import Count, Avg, Sum, F, Q
 from django.utils import timezone
 from datetime import timedelta
@@ -18,6 +18,8 @@ from datetime import timedelta
 from irp.cases.models import Case
 from irp.alerts.models import Alert
 from irp.observables.models import Observable
+
+from irp.common.audit import audit_action
 
 
 class MetricViewSet(viewsets.ReadOnlyModelViewSet):
@@ -29,65 +31,68 @@ class MetricViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = MetricSerializer
     permission_classes = [permissions.IsAuthenticated]
     
+    @audit_action(entity_type='METRIC', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
+
     @action(detail=True, methods=['get'])
+    @audit_action(entity_type='METRIC', action_type='GET_DATA')
     def data(self, request, pk=None):
         """
-        Get metric data for a specific period
+        Get data for a specific metric over a time period.
         """
         metric = self.get_object()
-        user = request.user
         
-        if not hasattr(user, 'profile') or not user.profile.organization:
+        # Get parameters
+        organization = request.user.profile.organization
+        if not organization:
             return Response(
-                {'detail': 'User not associated with an organization'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Parse query parameters
-        start_date = request.query_params.get('start_date')
-        end_date = request.query_params.get('end_date')
-        granularity = request.query_params.get('granularity', 'DAILY')
-        
-        # Parse dimensions from query params
-        dimensions = {}
-        for key, value in request.query_params.items():
-            if key.startswith('dimension_'):
-                dimension_name = key[10:]  # Remove 'dimension_' prefix
-                dimensions[dimension_name] = value
-        
-        # Validate required parameters
-        if not start_date or not end_date:
-            return Response(
-                {'detail': 'start_date and end_date are required'},
+                {"error": "User not associated with an organization"},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         try:
-            # Convert string dates to datetime
-            from django.utils.dateparse import parse_date
-            start_date = parse_date(start_date)
-            end_date = parse_date(end_date)
+            # Parse date parameters
+            end_date = request.query_params.get('end_date')
+            if not end_date:
+                end_date = timezone.now().date()
+            else:
+                end_date = timezone.datetime.strptime(end_date, '%Y-%m-%d').date()
             
-            if not start_date or not end_date:
-                raise ValueError("Invalid date format")
+            start_date = request.query_params.get('start_date')
+            if not start_date:
+                # Default to 30 days before end_date
+                start_date = end_date - timedelta(days=30)
+            else:
+                start_date = timezone.datetime.strptime(start_date, '%Y-%m-%d').date()
             
-            # Get metric data from service
-            # Note: This requires implementing MetricsService which should be imported
-            from .services import MetricsService
-            data = MetricsService.get_metric_data(
+            # Get granularity (daily, weekly, monthly)
+            granularity = request.query_params.get('granularity', 'DAILY')
+            if granularity not in ['DAILY', 'WEEKLY', 'MONTHLY']:
+                granularity = 'DAILY'
+            
+            # Parse dimensions
+            dimensions = {}
+            for key, value in request.query_params.items():
+                if key.startswith('dim_'):
+                    dimension_name = key[4:]  # Remove 'dim_' prefix
+                    dimensions[dimension_name] = value
+            
+            # Get metric data
+            metric_data = MetricsService.get_metric_data(
                 metric=metric,
-                organization=user.profile.organization,
+                organization=organization,
                 start_date=start_date,
                 end_date=end_date,
                 granularity=granularity,
                 dimensions=dimensions
             )
             
-            return Response(data)
+            return Response(metric_data)
             
         except Exception as e:
             return Response(
-                {'detail': str(e)},
+                {"error": str(e)},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -99,31 +104,46 @@ class MetricSnapshotViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = MetricSnapshotSerializer
     permission_classes = [permissions.IsAuthenticated]
     
+    @audit_action(entity_type='METRIC_SNAPSHOT', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
+
     def get_queryset(self):
         user = self.request.user
-        if hasattr(user, 'profile') and user.profile.organization:
-            queryset = MetricSnapshot.objects.filter(organization=user.profile.organization)
-            
-            # Filter by metric if provided
-            metric_id = self.request.query_params.get('metric_id')
-            if metric_id:
-                queryset = queryset.filter(metric__metric_id=metric_id)
-            
-            # Filter by date range if provided
-            start_date = self.request.query_params.get('start_date')
-            end_date = self.request.query_params.get('end_date')
-            if start_date:
-                queryset = queryset.filter(date__gte=start_date)
-            if end_date:
-                queryset = queryset.filter(date__lte=end_date)
-            
-            # Filter by granularity if provided
-            granularity = self.request.query_params.get('granularity')
-            if granularity:
-                queryset = queryset.filter(granularity=granularity)
-            
-            return queryset
-        return MetricSnapshot.objects.none()
+        if not hasattr(user, 'profile') or not user.profile.organization:
+            return MetricSnapshot.objects.none()
+        
+        organization = user.profile.organization
+        
+        # Filter parameters
+        metric_id = self.request.query_params.get('metric_id')
+        date_from = self.request.query_params.get('date_from')
+        date_to = self.request.query_params.get('date_to')
+        granularity = self.request.query_params.get('granularity')
+        
+        queryset = MetricSnapshot.objects.filter(organization=organization)
+        
+        if metric_id:
+            queryset = queryset.filter(metric_id=metric_id)
+        
+        if date_from:
+            try:
+                date_from = timezone.datetime.strptime(date_from, '%Y-%m-%d').date()
+                queryset = queryset.filter(date__gte=date_from)
+            except ValueError:
+                pass
+        
+        if date_to:
+            try:
+                date_to = timezone.datetime.strptime(date_to, '%Y-%m-%d').date()
+                queryset = queryset.filter(date__lte=date_to)
+            except ValueError:
+                pass
+        
+        if granularity:
+            queryset = queryset.filter(granularity=granularity)
+        
+        return queryset.order_by('-date')
 
 
 class DashboardViewSet(viewsets.ModelViewSet):
@@ -133,40 +153,41 @@ class DashboardViewSet(viewsets.ModelViewSet):
     serializer_class = DashboardSerializer
     permission_classes = [permissions.IsAuthenticated]
     
-    def get_queryset(self):
-        user = self.request.user
-        if hasattr(user, 'profile') and user.profile.organization:
-            return Dashboard.objects.filter(
-                models.Q(organization=user.profile.organization) | 
-                models.Q(is_system=True)
-            )
-        return Dashboard.objects.filter(is_system=True)  # Only system dashboards for users without org
-    
+    @audit_action(entity_type='DASHBOARD', action_type='CREATE')
     def perform_create(self, serializer):
         user = self.request.user
-        if hasattr(user, 'profile') and user.profile.organization:
-            serializer.save(
-                organization=user.profile.organization,
-                created_by=user
-            )
-        else:
-            raise exceptions.PermissionDenied("User must belong to an organization to create dashboards")
+        serializer.save(
+            organization=user.profile.organization,
+            created_by=user
+        )
     
+    @audit_action(entity_type='DASHBOARD', action_type='UPDATE')
     def perform_update(self, serializer):
-        dashboard = self.get_object()
-        
-        # Prevent updating system dashboards unless user is a system admin
-        if dashboard.is_system and not self.request.user.profile.is_system_admin:
-            raise exceptions.PermissionDenied("Cannot modify system dashboards")
-        
         serializer.save()
     
+    @audit_action(entity_type='DASHBOARD', action_type='DELETE')
     def perform_destroy(self, instance):
         # Prevent deleting system dashboards
         if instance.is_system:
             raise exceptions.PermissionDenied("Cannot delete system dashboards")
-        
         instance.delete()
+    
+    @audit_action(entity_type='DASHBOARD', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
+
+    def get_queryset(self):
+        user = self.request.user
+        if not hasattr(user, 'profile') or not user.profile.organization:
+            return Dashboard.objects.none()
+        
+        organization = user.profile.organization
+        
+        # Return dashboards for the user's organization and system dashboards
+        return Dashboard.objects.filter(
+            models.Q(organization=organization) | 
+            models.Q(is_system=True)
+        )
 
 
 class DashboardWidgetViewSet(viewsets.ModelViewSet):
@@ -176,57 +197,52 @@ class DashboardWidgetViewSet(viewsets.ModelViewSet):
     serializer_class = DashboardWidgetSerializer
     permission_classes = [permissions.IsAuthenticated]
     
-    def get_queryset(self):
-        user = self.request.user
-        if hasattr(user, 'profile') and user.profile.organization:
-            # Get dashboards this user has access to
-            accessible_dashboards = Dashboard.objects.filter(
-                models.Q(organization=user.profile.organization) | 
-                models.Q(is_system=True)
-            ).values_list('dashboard_id', flat=True)
-            
-            return DashboardWidget.objects.filter(dashboard__dashboard_id__in=accessible_dashboards)
-        
-        # User without org can only see widgets from system dashboards
-        system_dashboards = Dashboard.objects.filter(is_system=True).values_list('dashboard_id', flat=True)
-        return DashboardWidget.objects.filter(dashboard__dashboard_id__in=system_dashboards)
-    
+    @audit_action(entity_type='DASHBOARD_WIDGET', action_type='CREATE')
     def perform_create(self, serializer):
         dashboard = serializer.validated_data.get('dashboard')
-        
-        # Check if user has permission to modify this dashboard
         user = self.request.user
-        if dashboard.is_system and not user.profile.is_system_admin:
-            raise exceptions.PermissionDenied("Cannot add widgets to system dashboards")
+        organization = user.profile.organization
         
-        if dashboard.organization and (
-            not hasattr(user, 'profile') or 
-            not user.profile.organization or 
-            user.profile.organization.id != dashboard.organization.id
-        ):
-            raise exceptions.PermissionDenied("Cannot add widgets to dashboards from other organizations")
+        # Verify user has access to the dashboard
+        if not dashboard.is_system and dashboard.organization != organization:
+            raise exceptions.PermissionDenied(
+                "You don't have permission to modify this dashboard"
+            )
         
         serializer.save()
     
+    @audit_action(entity_type='DASHBOARD_WIDGET', action_type='UPDATE')
     def perform_update(self, serializer):
-        widget = self.get_object()
-        
-        # Prevent updating widgets in system dashboards
-        if widget.dashboard.is_system and not self.request.user.profile.is_system_admin:
-            raise exceptions.PermissionDenied("Cannot modify widgets in system dashboards")
-        
         serializer.save()
     
+    @audit_action(entity_type='DASHBOARD_WIDGET', action_type='DELETE')
     def perform_destroy(self, instance):
         # Prevent deleting widgets from system dashboards
-        if instance.dashboard.is_system and not self.request.user.profile.is_system_admin:
-            raise exceptions.PermissionDenied("Cannot delete widgets from system dashboards")
-        
+        if instance.dashboard.is_system:
+            raise exceptions.PermissionDenied("Cannot modify system dashboards")
         instance.delete()
+    
+    @audit_action(entity_type='DASHBOARD_WIDGET', action_type='VIEW')
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
+
+    def get_queryset(self):
+        user = self.request.user
+        if not hasattr(user, 'profile') or not user.profile.organization:
+            return DashboardWidget.objects.none()
+        
+        organization = user.profile.organization
+        
+        # Return widgets from the user's dashboards and system dashboards
+        return DashboardWidget.objects.filter(
+            models.Q(dashboard__organization=organization) | 
+            models.Q(dashboard__is_system=True)
+        )
 
 
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated, HasRolePermission])
+@audit_action(entity_type='DASHBOARD', action_type='GET_STATS')
 def dashboard_stats(request):
     """
     Endpoint para fornecer estatísticas do dashboard
@@ -326,6 +342,7 @@ def dashboard_stats(request):
 
 @api_view(['POST'])
 @permission_classes([permissions.IsAuthenticated, HasRolePermission])
+@audit_action(entity_type='METRIC', action_type='CALCULATE')
 def calculate_metrics(request):
     """
     Endpoint para calcular métricas e salvar snapshots

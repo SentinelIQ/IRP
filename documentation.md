@@ -63,7 +63,13 @@ Sistema de notificações com canais, regras e logs.
 Gerencia observáveis de segurança, tipos e níveis TLP/PAP.
 
 ### reports
-Geração de relatórios a partir de casos e templates.
+Geração de relatórios a partir de casos e templates, com suporte para diferentes formatos:
+- Templates personalizáveis (Markdown, DOCX, PDF)
+- Seções configuráveis (observáveis, timeline, técnicas MITRE, etc.)
+- Inclusão de anexos
+- Agendamento de relatórios periódicos
+- Filtros de casos para relatórios automáticos
+- Notificações por email
 
 ### timeline
 Registra eventos de timeline relacionados a casos e alertas.

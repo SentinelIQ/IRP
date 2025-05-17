@@ -93,7 +93,92 @@ def create_timeline_event(case, organization, event_type, description, actor,
         }
     )
     
+    # Publicar evento no sistema de notificações
+    publish_notification_event(event, case, organization)
+    
     return event
+
+def publish_notification_event(timeline_event, case, organization):
+    """
+    Publica um evento de timeline no sistema de notificações para processamento.
+    
+    Args:
+        timeline_event: O evento de timeline
+        case: O caso relacionado ao evento
+        organization: A organização do caso
+    """
+    try:
+        from irp.notifications.services import NotificationService
+        
+        # Mapear evento de timeline para evento do sistema de notificações
+        notification_event_mapping = {
+            # Eventos de Caso
+            EventType.CASE_CREATED: "CASE_CREATED",
+            EventType.CASE_UPDATED: "CASE_UPDATED",
+            EventType.CASE_CLOSED: "CASE_CLOSED",
+            EventType.STATUS_CHANGED: "CASE_STATUS_CHANGED",
+            EventType.USER_ASSIGNED: "CASE_USER_ASSIGNED",
+            
+            # Eventos de Tarefa
+            EventType.TASK_CREATED: "TASK_CREATED",
+            EventType.TASK_COMPLETED: "TASK_COMPLETED",
+            EventType.TASK_ASSIGNED: "TASK_USER_ASSIGNED",
+            
+            # Eventos importantes
+            EventType.OBSERVABLE_ADDED: "OBSERVABLE_ADDED_TO_CASE" if timeline_event.is_important else None,
+            EventType.MITRE_TECHNIQUE_ADDED: "MITRE_TECHNIQUE_ADDED_TO_CASE",
+            EventType.ALERT_ESCALATED: "ALERT_ESCALATED_TO_CASE",
+            
+            # Outros eventos que merecem notificação
+            EventType.IMPORTANT_UPDATE: "CASE_IMPORTANT_UPDATE",
+        }
+        
+        # Verificar se este evento deve ser notificado
+        notification_event_name = notification_event_mapping.get(timeline_event.event_type)
+        if not notification_event_name:
+            return  # Não notificar para este tipo de evento
+        
+        # Criar payload para o evento
+        payload = {
+            "case": {
+                "case_id": str(case.case_id),
+                "title": case.title,
+                "description": case.description[:200] + "..." if len(case.description) > 200 else case.description,
+                "severity": case.severity.name if case.severity else "Unknown",
+                "status": case.status.name if case.status else "Unknown",
+                "assignee": case.assignee.username if case.assignee else None,
+                "assignee_name": f"{case.assignee.first_name} {case.assignee.last_name}".strip() if case.assignee else None,
+                "created_at": case.created_at.isoformat() if case.created_at else None,
+                "updated_at": case.updated_at.isoformat() if case.updated_at else None,
+                "url": f"/cases/{case.case_id}"  # URL relativa para o caso
+            },
+            "event": {
+                "event_id": str(timeline_event.event_id),
+                "event_type": timeline_event.event_type,
+                "description": timeline_event.description,
+                "is_important": timeline_event.is_important,
+                "occurred_at": timeline_event.occurred_at.isoformat(),
+                "actor": timeline_event.actor.username if timeline_event.actor else None,
+                "actor_name": f"{timeline_event.actor.first_name} {timeline_event.actor.last_name}".strip() if timeline_event.actor else None,
+                "metadata": timeline_event.metadata
+            },
+            "organization": {
+                "organization_id": str(organization.organization_id),
+                "name": organization.name
+            }
+        }
+        
+        # Processar o evento no sistema de notificações
+        NotificationService.process_event(
+            event_name=notification_event_name,
+            payload=payload,
+            organization=organization
+        )
+        
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.exception(f"Error publishing notification event: {str(e)}")
 
 def get_recent_events(case=None, organization=None, limit=10, event_types=None, since=None, until=None, 
                      important_only=False, actor=None, entity_type=None, entity_id=None):

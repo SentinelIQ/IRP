@@ -10,6 +10,12 @@ app = Celery('core')
 # Carregar configuração do Django settings
 app.config_from_object('django.conf:settings', namespace='CELERY')
 
+# Importar configuração do beat schedule
+from core.celery_beat_config import beat_schedule
+
+# Configurar o schedule do Beat
+app.conf.beat_schedule = beat_schedule
+
 # Autodescoberta de tarefas em arquivos tasks.py de cada app Django
 app.autodiscover_tasks()
 

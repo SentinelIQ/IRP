@@ -2,6 +2,7 @@ import logging
 import os
 import uuid
 import json
+import shutil
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Union
 from pathlib import Path
@@ -16,8 +17,8 @@ from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 import weasyprint
 
-from .models import ReportTemplate, GeneratedReport
-from irp.cases.models import Case, CaseObservable, CaseMitreTechnique, Task, CaseComment
+from .models import ReportTemplate, GeneratedReport, ScheduledReport
+from irp.cases.models import Case, CaseObservable, CaseMitreTechnique, Task, CaseComment, CaseAttachment
 from irp.observables.models import Observable
 from irp.timeline.models import TimelineEvent
 
@@ -76,21 +77,47 @@ class ReportService:
         )
         
         try:
+            # Adicionar 'attachments' às seções se include_attachments for True
+            if include_attachments and sections and 'attachments' not in sections:
+                sections.append('attachments')
+            elif include_attachments and not sections:
+                sections = ['attachments']
+                
             # Coletar dados do caso
             case_data = cls._collect_case_data(case, sections)
+            
+            # Criar diretório para o relatório específico (para anexos)
+            report_dir = cls.REPORTS_DIR / f"report_{case.case_id}_{report.report_id}"
+            os.makedirs(report_dir, exist_ok=True)
+            
+            # Criar diretório de anexos, se necessário
+            attachments_dir = None
+            if include_attachments and case_data.get('attachments'):
+                attachments_dir = report_dir / "attachments"
+                os.makedirs(attachments_dir, exist_ok=True)
+                
+                # Copiar anexos para o diretório do relatório
+                for attachment in case_data.get('attachments', []):
+                    src_path = attachment.get('file_path')
+                    if src_path and os.path.exists(src_path):
+                        filename = attachment.get('filename')
+                        dst_path = attachments_dir / filename
+                        shutil.copy2(src_path, dst_path)
+                        # Atualizar caminho para referência relativa ao relatório
+                        attachment['report_relative_path'] = f"attachments/{filename}"
             
             # Gerar o relatório no formato especificado
             if output_format == 'MARKDOWN':
                 file_path, file_size = cls._generate_markdown_report(
-                    case_data, template, custom_header, custom_footer, report.report_id
+                    case_data, template, custom_header, custom_footer, report.report_id, include_attachments
                 )
             elif output_format == 'DOCX':
                 file_path, file_size = cls._generate_docx_report(
-                    case_data, template, custom_header, custom_footer, report.report_id
+                    case_data, template, custom_header, custom_footer, report.report_id, include_attachments
                 )
             elif output_format == 'PDF':
                 file_path, file_size = cls._generate_pdf_report(
-                    case_data, template, custom_header, custom_footer, report.report_id
+                    case_data, template, custom_header, custom_footer, report.report_id, include_attachments
                 )
             else:
                 raise ValueError(f"Formato de saída não suportado: {output_format}")
@@ -169,6 +196,9 @@ class ReportService:
             
         if not sections or 'alerts' in sections:
             data['alerts'] = cls._collect_case_alerts(case)
+            
+        if not sections or 'attachments' in sections:
+            data['attachments'] = cls._collect_case_attachments(case)
         
         return data
     
@@ -337,6 +367,32 @@ class ReportService:
             
         return result
     
+    @staticmethod
+    def _collect_case_attachments(case: Case) -> List[Dict]:
+        """
+        Coleta os anexos do caso
+        """
+        result = []
+        
+        attachments = CaseAttachment.objects.filter(case=case)
+        
+        for attachment in attachments:
+            result.append({
+                'id': str(attachment.attachment_id) if hasattr(attachment, 'attachment_id') else str(uuid.uuid4()),
+                'filename': attachment.filename,
+                'file_path': attachment.file_path,
+                'content_type': attachment.content_type,
+                'file_size': attachment.file_size,
+                'description': attachment.description,
+                'uploaded_at': attachment.uploaded_at,
+                'uploaded_by': {
+                    'username': attachment.uploaded_by.username if attachment.uploaded_by else None,
+                    'full_name': f"{attachment.uploaded_by.first_name} {attachment.uploaded_by.last_name}".strip() if attachment.uploaded_by else None
+                }
+            })
+            
+        return result
+    
     @classmethod
     def _generate_markdown_report(
         cls,
@@ -344,7 +400,8 @@ class ReportService:
         template: Optional[ReportTemplate],
         custom_header: Optional[str],
         custom_footer: Optional[str],
-        report_id: uuid.UUID
+        report_id: uuid.UUID,
+        include_attachments: bool = False
     ) -> tuple:
         """
         Gera um relatório em formato Markdown
@@ -386,7 +443,8 @@ class ReportService:
         template: Optional[ReportTemplate],
         custom_header: Optional[str],
         custom_footer: Optional[str],
-        report_id: uuid.UUID
+        report_id: uuid.UUID,
+        include_attachments: bool = False
     ) -> tuple:
         """
         Gera um relatório em formato DOCX (Microsoft Word)
@@ -455,6 +513,9 @@ class ReportService:
             
         if not sections or 'comments' in sections:
             cls._add_comments_to_docx(doc, case_data.get('comments', []))
+            
+        if (not sections or 'attachments' in sections) and include_attachments:
+            cls._add_attachments_to_docx(doc, case_data.get('attachments', []))
         
         # Adicionar rodapé
         doc.add_paragraph("\n\n")
@@ -590,6 +651,40 @@ class ReportService:
             p.add_run(f"({comment.get('created_at').strftime('%Y-%m-%d %H:%M:%S')}): ")
             p.add_run(comment.get('text', ''))
     
+    @staticmethod
+    def _add_attachments_to_docx(doc, attachments):
+        """Adiciona seção de anexos ao documento DOCX"""
+        if not attachments:
+            return
+            
+        doc.add_heading("Attachments", level=2)
+        
+        table = doc.add_table(rows=1, cols=4)
+        table.style = 'Table Grid'
+        
+        hdr_cells = table.rows[0].cells
+        hdr_cells[0].text = "Filename"
+        hdr_cells[1].text = "Size"
+        hdr_cells[2].text = "Uploaded By"
+        hdr_cells[3].text = "Description"
+        
+        for attachment in attachments:
+            row_cells = table.add_row().cells
+            row_cells[0].text = attachment.get('filename', '')
+            
+            file_size = attachment.get('file_size', 0)
+            # Formatar tamanho do arquivo
+            if file_size < 1024:
+                size_str = f"{file_size} bytes"
+            elif file_size < 1024 * 1024:
+                size_str = f"{file_size/1024:.1f} KB"
+            else:
+                size_str = f"{file_size/(1024*1024):.1f} MB"
+                
+            row_cells[1].text = size_str
+            row_cells[2].text = attachment.get('uploaded_by', {}).get('full_name', 'Unknown')
+            row_cells[3].text = attachment.get('description', '')
+    
     @classmethod
     def _generate_pdf_report(
         cls,
@@ -597,7 +692,8 @@ class ReportService:
         template: Optional[ReportTemplate],
         custom_header: Optional[str],
         custom_footer: Optional[str],
-        report_id: uuid.UUID
+        report_id: uuid.UUID,
+        include_attachments: bool = False
     ) -> tuple:
         """
         Gera um relatório em formato PDF
@@ -754,6 +850,148 @@ class ReportService:
             for comment in case_data['comments']:
                 template += f"**{comment.get('user_full_name', comment.get('user', 'Unknown'))}** ({comment.get('created_at').strftime('%Y-%m-%d %H:%M:%S')}): {comment.get('text', '')}\n\n"
 
+        if 'attachments' in case_data and case_data['attachments']:
+            template += """
+## Attachments
+
+| Filename | Size | Uploaded By | Description |
+|----------|------|-------------|-------------|
+"""
+            for attachment in case_data['attachments']:
+                file_size = attachment.get('file_size', 0)
+                # Formatar tamanho do arquivo
+                if file_size < 1024:
+                    size_str = f"{file_size} bytes"
+                elif file_size < 1024 * 1024:
+                    size_str = f"{file_size/1024:.1f} KB"
+                else:
+                    size_str = f"{file_size/(1024*1024):.1f} MB"
+                    
+                template += f"| {attachment.get('filename', '')} | {size_str} | {attachment.get('uploaded_by', {}).get('full_name', 'Unknown')} | {attachment.get('description', '')} |\n"
+
         template += f"\n\n---\nGenerated at: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
         return template 
+
+    @classmethod
+    def process_scheduled_reports(cls):
+        """
+        Processa todos os relatórios agendados que estão pendentes
+        Esta função é chamada periodicamente pelo Celery
+        """
+        from .models import ScheduledReport
+        from irp.cases.models import Case
+        from django.utils import timezone
+        from django.db.models import Q
+        
+        now = timezone.now()
+        logger.info(f"Processando relatórios agendados: {now}")
+        
+        # Obter todos os relatórios agendados pendentes
+        pending_schedules = ScheduledReport.objects.filter(
+            is_active=True,
+            next_run__lte=now
+        )
+        
+        logger.info(f"Encontrados {pending_schedules.count()} relatórios agendados pendentes")
+        
+        for schedule in pending_schedules:
+            try:
+                logger.info(f"Processando agendamento: {schedule.name} (ID: {schedule.schedule_id})")
+                
+                # Construir filtro de casos
+                case_query = Q(organization=schedule.organization)
+                
+                # Adicionar filtros adicionais
+                filters = schedule.case_filter
+                if filters:
+                    if filters.get('status'):
+                        case_query &= Q(status__name__in=filters.get('status'))
+                    if filters.get('severity'):
+                        case_query &= Q(severity__name__in=filters.get('severity'))
+                    if filters.get('tags'):
+                        # Para cada tag no filtro, exigir que esteja presente no caso
+                        for tag in filters.get('tags'):
+                            case_query &= Q(tags__contains=[tag])
+                
+                # Filtrar casos de acordo com os critérios
+                cases = Case.objects.filter(case_query)
+                
+                logger.info(f"Encontrados {cases.count()} casos correspondentes aos critérios")
+                
+                # Registrar última execução
+                schedule.last_run = now
+                
+                # Calcular próxima execução
+                schedule.calculate_next_run()
+                schedule.save()
+                
+                # Gerar relatórios para cada caso
+                for case in cases:
+                    try:
+                        # Gerar o relatório
+                        report = cls.generate_report(
+                            case=case,
+                            template=schedule.template,
+                            output_format=schedule.output_format,
+                            sections=schedule.include_sections,
+                            include_attachments=schedule.include_attachments,
+                            custom_header=schedule.custom_header,
+                            custom_footer=schedule.custom_footer,
+                            generated_by=schedule.created_by
+                        )
+                        
+                        # Enviar notificações para os usuários configurados
+                        if schedule.send_email and report.status == 'COMPLETED':
+                            cls._send_report_notification(schedule, report, case)
+                            
+                    except Exception as e:
+                        logger.error(f"Erro ao gerar relatório para caso {case.case_id}: {str(e)}")
+                
+            except Exception as e:
+                logger.error(f"Erro ao processar agendamento {schedule.schedule_id}: {str(e)}")
+    
+    @staticmethod
+    def _send_report_notification(schedule, report, case):
+        """
+        Envia notificações para os usuários configurados sobre o relatório gerado
+        """
+        from django.core.mail import send_mail
+        from django.conf import settings
+        
+        # Obter usuários que devem ser notificados
+        users = schedule.notify_users.all()
+        
+        if not users:
+            return
+            
+        # Preparar mensagem de email
+        subject = f"[IRP] Relatório agendado gerado: {case.title}"
+        message = f"""Olá,
+
+Um relatório foi gerado automaticamente para o caso "{case.title}".
+
+Detalhes do relatório:
+- ID do relatório: {report.report_id}
+- Formato: {report.output_format}
+- Gerado em: {report.created_at.strftime('%Y-%m-%d %H:%M:%S')}
+
+Você pode acessar e baixar este relatório através do sistema IRP.
+
+--
+Este é um email automático, por favor não responda.
+"""
+        
+        # Enviar email para cada usuário
+        for user in users:
+            if user.email:
+                try:
+                    send_mail(
+                        subject,
+                        message,
+                        settings.DEFAULT_FROM_EMAIL,
+                        [user.email],
+                        fail_silently=False,
+                    )
+                except Exception as e:
+                    logger.error(f"Erro ao enviar email para {user.email}: {str(e)}") 
