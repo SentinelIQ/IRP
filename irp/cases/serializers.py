@@ -95,6 +95,12 @@ class CaseSerializer(serializers.ModelSerializer):
     alerts = SimplifiedAlertSerializer(many=True, read_only=True)
     custom_field_values = CaseCustomFieldValueSerializer(many=True, read_only=True)
     
+    # Fields for MITRE techniques during case creation (write-only)
+    mitre_technique_id = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True,
+                                              help_text="Optional MITRE ATT&CK technique ID to associate with the case")
+    mitre_subtechnique_id = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True,
+                                                 help_text="Optional MITRE ATT&CK sub-technique ID to associate with the case")
+    
     class Meta:
         model = Case
         fields = '__all__'

@@ -54,6 +54,12 @@ class AlertSerializer(serializers.ModelSerializer):
     comments = AlertCommentSerializer(many=True, read_only=True)
     custom_field_values = AlertCustomFieldValueSerializer(many=True, read_only=True)
     
+    # Fields for MITRE techniques during alert creation (write-only)
+    mitre_technique_id = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True,
+                                              help_text="Optional MITRE ATT&CK technique ID to associate with the alert")
+    mitre_subtechnique_id = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True,
+                                                 help_text="Optional MITRE ATT&CK sub-technique ID to associate with the alert")
+    
     class Meta:
         model = Alert
         fields = '__all__'

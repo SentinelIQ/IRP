@@ -10,6 +10,7 @@ from .models import (
     CaseCustomFieldDefinition, CaseCustomFieldValue, Task,
     TaskStatus, CaseObservable, CaseMitreTechnique
 )
+from irp.mitre.models import MitreTechnique
 from .serializers import (
     CaseSeveritySerializer, CaseStatusSerializer, CaseTemplateSerializer,
     CaseSerializer, CaseCommentSerializer, CaseCustomFieldDefinitionSerializer,
@@ -105,6 +106,10 @@ class CaseViewSet(viewsets.ModelViewSet):
         status_id = self.request.data.get('status_id')
         template_id = self.request.data.get('template_id')
         
+        # Obter técnicas MITRE opcionais
+        mitre_technique_id = serializer.validated_data.pop('mitre_technique_id', None)
+        mitre_subtechnique_id = serializer.validated_data.pop('mitre_subtechnique_id', None)
+        
         # Verificar se há um status padrão, caso nenhum tenha sido fornecido
         if not status_id:
             default_status = CaseStatus.objects.filter(
@@ -146,6 +151,64 @@ class CaseViewSet(viewsets.ModelViewSet):
                 'template': str(template) if template else None
             }
         )
+        
+        # Associar técnicas MITRE, se fornecidas
+        if mitre_technique_id and mitre_technique_id.strip():
+            try:
+                technique = MitreTechnique.objects.get(technique_id=mitre_technique_id)
+                case_technique = CaseMitreTechnique.objects.create(
+                    case=case,
+                    technique=technique,
+                    linked_by=user,
+                    context_notes="Adicionado durante a criação do caso"
+                )
+                
+                # Adicionar evento na timeline
+                create_timeline_event(
+                    case=case,
+                    organization=user.profile.organization,
+                    event_type='MITRE_TECHNIQUE_ADDED',
+                    description=f"Técnica MITRE ATT&CK adicionada: {technique.technique_id} - {technique.name}",
+                    actor=user,
+                    target_entity_type='MitreTechnique',
+                    target_entity_id=str(technique.technique_id),
+                    metadata={
+                        'technique_id': technique.technique_id,
+                        'technique_name': technique.name
+                    }
+                )
+            except MitreTechnique.DoesNotExist:
+                # Log error but continue case creation
+                pass
+        
+        # Associar subtécnica MITRE, se fornecida
+        if mitre_subtechnique_id and mitre_subtechnique_id.strip():
+            try:
+                subtechnique = MitreTechnique.objects.get(technique_id=mitre_subtechnique_id)
+                case_subtechnique = CaseMitreTechnique.objects.create(
+                    case=case,
+                    technique=subtechnique,
+                    linked_by=user,
+                    context_notes="Adicionado durante a criação do caso"
+                )
+                
+                # Adicionar evento na timeline
+                create_timeline_event(
+                    case=case,
+                    organization=user.profile.organization,
+                    event_type='MITRE_TECHNIQUE_ADDED',
+                    description=f"Subtécnica MITRE ATT&CK adicionada: {subtechnique.technique_id} - {subtechnique.name}",
+                    actor=user,
+                    target_entity_type='MitreTechnique',
+                    target_entity_id=str(subtechnique.technique_id),
+                    metadata={
+                        'technique_id': subtechnique.technique_id,
+                        'technique_name': subtechnique.name
+                    }
+                )
+            except MitreTechnique.DoesNotExist:
+                # Log error but continue case creation
+                pass
         
         # Se há um template, processar as tarefas predefinidas
         if template and template.predefined_tasks:

@@ -12,6 +12,7 @@ from .models import (
     AlertCustomFieldDefinition, AlertCustomFieldValue,
     AlertObservable
 )
+from irp.mitre.models import MitreTechnique, AlertMitreTechnique
 # AlertMitreTechnique foi movido para irp.mitre.models
 from .serializers import (
     AlertSeveritySerializer, AlertStatusSerializer, AlertSerializer,
@@ -89,6 +90,10 @@ class AlertViewSet(viewsets.ModelViewSet):
         severity_id = self.request.data.get('severity_id')
         status_id = self.request.data.get('status_id')
         
+        # Obter técnicas MITRE opcionais
+        mitre_technique_id = serializer.validated_data.pop('mitre_technique_id', None)
+        mitre_subtechnique_id = serializer.validated_data.pop('mitre_subtechnique_id', None)
+        
         # Verificar se há um status padrão, caso nenhum tenha sido fornecido
         if not status_id:
             default_status = AlertStatus.objects.filter(
@@ -106,12 +111,43 @@ class AlertViewSet(viewsets.ModelViewSet):
         severity = get_object_or_404(AlertSeverity, pk=severity_id) if severity_id else None
         status = get_object_or_404(AlertStatus, pk=status_id) if status_id else None
         
-        return serializer.save(
+        # Criar o alerta
+        alert = serializer.save(
             organization=user.profile.organization,
             severity=severity,
             status=status,
             first_seen_at=timezone.now()
         )
+        
+        # Associar técnicas MITRE, se fornecidas
+        if mitre_technique_id and mitre_technique_id.strip():
+            try:
+                technique = MitreTechnique.objects.get(technique_id=mitre_technique_id)
+                alert_technique = AlertMitreTechnique.objects.create(
+                    alert=alert,
+                    technique=technique,
+                    added_by=user,
+                    notes="Adicionado durante a criação do alerta"
+                )
+            except MitreTechnique.DoesNotExist:
+                # Log error but continue alert creation
+                pass
+        
+        # Associar subtécnica MITRE, se fornecida
+        if mitre_subtechnique_id and mitre_subtechnique_id.strip():
+            try:
+                subtechnique = MitreTechnique.objects.get(technique_id=mitre_subtechnique_id)
+                alert_subtechnique = AlertMitreTechnique.objects.create(
+                    alert=alert,
+                    technique=subtechnique,
+                    added_by=user,
+                    notes="Adicionado durante a criação do alerta"
+                )
+            except MitreTechnique.DoesNotExist:
+                # Log error but continue alert creation
+                pass
+                
+        return alert
     
     @audit_action(entity_type='ALERT', action_type='UPDATE')
     def perform_update(self, serializer):
