@@ -31,13 +31,38 @@ class TeamViewSet(viewsets.ModelViewSet):
     required_permission = 'manage_teams'
 
     def get_queryset(self):
-        # Isolamento multi-tenant: só times da organização do usuário
+        # Verificar se estamos acessando por uma rota aninhada (organização específica)
+        organization_id = self.kwargs.get('organization_pk')
+        
         user = self.request.user
+        if organization_id:
+            # Verificar se o usuário pode acessar esta organização
+            if user.profile.is_system_admin:
+                return Team.objects.filter(organization_id=organization_id)
+            elif hasattr(user, 'profile') and user.profile.organization and \
+                 str(user.profile.organization.organization_id) == organization_id:
+                return Team.objects.filter(organization_id=organization_id)
+            return Team.objects.none()
+        
+        # Isolamento multi-tenant: só times da organização do usuário
         if hasattr(user, 'profile') and user.profile.organization:
             return Team.objects.filter(organization=user.profile.organization)
         return Team.objects.none()
 
     def perform_create(self, serializer):
+        # Verificar se estamos acessando por uma rota aninhada (organização específica)
+        organization_id = self.kwargs.get('organization_pk')
+        
+        if organization_id:
+            from .models import Organization
+            try:
+                organization = Organization.objects.get(organization_id=organization_id)
+                serializer.save(organization=organization)
+                return
+            except Organization.DoesNotExist:
+                pass
+        
+        # Caso padrão: usar a organização do usuário
         user = self.request.user
         if hasattr(user, 'profile') and user.profile.organization:
             serializer.save(organization=user.profile.organization)
@@ -157,6 +182,110 @@ class LogoutView(APIView):
         except Exception as e:
             return Response({'error': str(e)}, 
                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ChangePasswordView(APIView):
+    """
+    Endpoint para alterar a senha do usuário logado.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def post(self, request):
+        user = request.user
+        current_password = request.data.get('current_password')
+        new_password = request.data.get('new_password')
+        confirm_password = request.data.get('confirm_password')
+        
+        # Validar entrada
+        if not current_password or not new_password or not confirm_password:
+            return Response(
+                {'error': 'Por favor, informe a senha atual e a nova senha (com confirmação)'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Verificar se a senha atual está correta
+        if not user.check_password(current_password):
+            return Response(
+                {'error': 'Senha atual incorreta'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Verificar se as novas senhas coincidem
+        if new_password != confirm_password:
+            return Response(
+                {'error': 'As novas senhas não coincidem'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Alterar a senha
+        user.set_password(new_password)
+        user.save()
+        
+        # Atualizar o token
+        if hasattr(user, 'auth_token'):
+            user.auth_token.delete()
+        token, _ = Token.objects.get_or_create(user=user)
+        
+        return Response({
+            'message': 'Senha alterada com sucesso',
+            'token': token.key
+        })
+
+
+class AdminResetPasswordView(APIView):
+    """
+    Endpoint para administradores redefinir a senha de outro usuário.
+    """
+    permission_classes = [permissions.IsAuthenticated, HasRolePermission]
+    required_permission = 'user:edit'
+    
+    def post(self, request, user_id):
+        try:
+            target_user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response(
+                {'error': 'Usuário não encontrado'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Verificar se o usuário alvo pertence à mesma organização
+        admin_user = request.user
+        if (hasattr(admin_user, 'profile') and hasattr(target_user, 'profile') and 
+            admin_user.profile.organization != target_user.profile.organization and
+            not admin_user.profile.is_system_admin):
+            return Response(
+                {'error': 'Você não tem permissão para redefinir a senha deste usuário'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        new_password = request.data.get('new_password')
+        confirm_password = request.data.get('confirm_password')
+        
+        # Validar entrada
+        if not new_password or not confirm_password:
+            return Response(
+                {'error': 'Por favor, informe a nova senha (com confirmação)'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Verificar se as novas senhas coincidem
+        if new_password != confirm_password:
+            return Response(
+                {'error': 'As senhas não coincidem'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Redefinir a senha
+        target_user.set_password(new_password)
+        target_user.save()
+        
+        # Revogar os tokens existentes do usuário
+        if hasattr(target_user, 'auth_token'):
+            target_user.auth_token.delete()
+        
+        return Response({
+            'message': f'Senha do usuário {target_user.username} redefinida com sucesso'
+        })
 
 
 @api_view(['GET'])

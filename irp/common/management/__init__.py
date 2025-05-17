@@ -1,1 +1,1 @@
- 
+# Módulo de gerenciamento para comandos personalizados 
